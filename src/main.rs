@@ -2,11 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 
 mod cli;
-mod config;
-mod db;
-mod sync;
-mod tempo;
-mod types;
 
 use cli::{Cli, Commands};
 

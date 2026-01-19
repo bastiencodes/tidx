@@ -3,11 +3,11 @@ use clap::{Args as ClapArgs, Subcommand};
 use tokio::sync::broadcast;
 use tracing::info;
 
-use crate::config::chain_name;
-use crate::db::{self, PartitionManager};
-use crate::sync::engine::SyncEngine;
-use crate::sync::fetcher::RpcClient;
-use crate::sync::writer::load_sync_state;
+use ak47::config::chain_name;
+use ak47::db::{self, PartitionManager};
+use ak47::sync::engine::SyncEngine;
+use ak47::sync::fetcher::RpcClient;
+use ak47::sync::writer::load_sync_state;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -158,7 +158,7 @@ async fn run_status(pool: &db::Pool, rpc_url: &str) -> Result<()> {
     println!("  Total blocks:  {}", indexed_blocks);
 
     // Check for gaps
-    let gaps = crate::sync::writer::detect_gaps(pool).await?;
+    let gaps = ak47::sync::writer::detect_gaps(pool).await?;
     if gaps.is_empty() {
         println!("  Gaps:         None");
     } else {

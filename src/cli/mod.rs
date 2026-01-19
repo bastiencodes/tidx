@@ -16,7 +16,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start syncing blocks from the chain (continuous)
+    /// Start syncing blocks from the chain (continuous) and serve HTTP API
     Up(up::Args),
     /// Show sync status
     Status(status::Args),
