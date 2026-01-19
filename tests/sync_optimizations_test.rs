@@ -79,8 +79,14 @@ async fn test_batch_write_blocks() {
     let blocks = generate_blocks(50, 10_000_000);
     write_blocks(&db.pool, &blocks).await.expect("Failed to write blocks");
 
-    let count = db.block_count().await;
-    assert_eq!(count, 50, "Expected 50 blocks written");
+    // Verify blocks in our range were written
+    let conn = db.pool.get().await.unwrap();
+    let count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM blocks WHERE num >= 10000000 AND num < 10000050", &[])
+        .await
+        .expect("Failed to count")
+        .get(0);
+    assert_eq!(count, 50, "Expected 50 blocks written in range");
 
     // Verify first and last block
     let conn = db.pool.get().await.unwrap();

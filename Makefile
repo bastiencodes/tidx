@@ -86,11 +86,11 @@ psql:
 build:
 	@$(COMPOSE) build ak47
 
-# Run tests (auto-seeds database if needed)
+# Run tests (sequential execution due to shared DB)
 test:
 	@$(COMPOSE) up -d timescaledb tempo
 	@sleep 2
-	@cargo test -- --nocapture
+	@cargo test -- --test-threads=1 --nocapture
 
 # Run benchmarks
 bench:

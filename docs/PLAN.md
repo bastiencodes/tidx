@@ -903,8 +903,9 @@ cargo run -- query "SELECT encode(hash, 'hex'), valid_after, valid_before FROM t
 
 ---
 
-### Phase 3: Realtime Tail + Consistency
+### Phase 3: Realtime Tail + Consistency ✅
 **Duration**: 2-3 days  
+**Status**: Complete  
 **Deliverable**: Continuous sync with chain consistency guarantees
 
 #### What You Get
@@ -912,6 +913,7 @@ cargo run -- query "SELECT encode(hash, 'hex'), valid_after, valid_before FROM t
 - Parent-hash validation ensures chain consistency
 - No reorg handling needed (Tempo has instant finality)
 - Graceful shutdown with state persistence
+- Gap detection and backfilling
 
 #### Implementation Tasks
 
