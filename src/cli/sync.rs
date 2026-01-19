@@ -1,13 +1,13 @@
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
 use clap::{Args as ClapArgs, Subcommand};
-use std::collections::HashMap;
+use tokio::sync::broadcast;
 use tracing::info;
 
+use crate::config::chain_name;
 use crate::db::{self, PartitionManager};
-use crate::sync::decoder::{decode_block, decode_log, decode_transaction};
+use crate::sync::engine::SyncEngine;
 use crate::sync::fetcher::RpcClient;
-use crate::sync::writer::{write_block, write_logs, write_txs};
+use crate::sync::writer::load_sync_state;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -29,20 +29,23 @@ pub struct Args {
 
 #[derive(Subcommand)]
 pub enum SyncCommands {
-    /// Sync blocks forward from a range
-    Forward {
-        /// Start block number
+    /// Backfill blocks going backwards from head toward genesis
+    Backfill {
+        /// Start block number (defaults to current synced_num or chain head)
         #[arg(long)]
-        from: u64,
+        from: Option<u64>,
 
-        /// End block number
-        #[arg(long)]
+        /// Target block number to backfill to (default: 0 = genesis)
+        #[arg(long, default_value = "0")]
         to: u64,
 
         /// Batch size for RPC requests
         #[arg(long, default_value = "100")]
         batch_size: u64,
     },
+
+    /// Show sync status
+    Status,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -51,97 +54,119 @@ pub async fn run(args: Args) -> Result<()> {
         db::run_migrations(&pool).await?;
     }
 
-    let rpc = RpcClient::new(&args.rpc);
-    let partitions = PartitionManager::new(pool.clone());
-
     match args.command {
-        SyncCommands::Forward {
+        SyncCommands::Backfill {
             from,
             to,
             batch_size,
         } => {
-            run_forward(&pool, &rpc, &partitions, from, to, batch_size).await?;
+            run_backfill(&pool, &args.rpc, from, to, batch_size).await?;
+        }
+        SyncCommands::Status => {
+            run_status(&pool, &args.rpc).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_forward(
+async fn run_backfill(
     pool: &db::Pool,
-    rpc: &RpcClient,
-    partitions: &PartitionManager,
-    from: u64,
+    rpc_url: &str,
+    from: Option<u64>,
     to: u64,
     batch_size: u64,
 ) -> Result<()> {
-    info!(from, to, batch_size, "Starting forward sync");
+    let engine = SyncEngine::new(pool.clone(), rpc_url).await?;
+    let partitions = PartitionManager::new(pool.clone());
 
-    let mut synced = 0u64;
-    let mut total_logs = 0u64;
-    let total = to - from + 1;
-
-    for chunk_start in (from..=to).step_by(batch_size as usize) {
-        let chunk_end = (chunk_start + batch_size - 1).min(to);
-
-        partitions.ensure_partition(chunk_end).await?;
-
-        let (blocks, receipts) = tokio::try_join!(
-            rpc.get_blocks_batch(chunk_start..=chunk_end),
-            rpc.get_receipts_batch(chunk_start..=chunk_end)
-        )?;
-
-        let block_timestamps: HashMap<u64, _> = blocks
-            .iter()
-            .map(|b| {
-                let ts = Utc.timestamp_opt(b.timestamp_u64() as i64, 0).unwrap();
-                (b.number_u64(), ts)
-            })
-            .collect();
-
-        for block in &blocks {
-            let block_row = decode_block(block);
-            write_block(pool, &block_row).await?;
-
-            let txs: Vec<_> = block
-                .transactions()
-                .enumerate()
-                .map(|(i, tx)| decode_transaction(tx, block, i as u32))
-                .collect();
-
-            write_txs(pool, &txs).await?;
+    // Determine starting block
+    let state = engine.status().await?;
+    let start_block = match from {
+        Some(n) => n,
+        None => {
+            // Default to synced_num if we have state, otherwise get chain head
+            if state.synced_num > 0 {
+                state.synced_num
+            } else {
+                let rpc = RpcClient::new(rpc_url);
+                rpc.latest_block_number().await?
+            }
         }
+    };
 
-        let all_logs: Vec<_> = receipts
-            .iter()
-            .flatten()
-            .flat_map(|receipt| {
-                let block_num = receipt.block_number.to::<u64>();
-                block_timestamps
-                    .get(&block_num)
-                    .map(|&ts| receipt.logs.iter().map(move |log| decode_log(log, ts)))
-                    .into_iter()
-                    .flatten()
-            })
-            .collect();
-
-        let log_count = all_logs.len();
-        write_logs(pool, &all_logs).await?;
-        total_logs += log_count as u64;
-
-        synced += blocks.len() as u64;
-        let pct = (synced as f64 / total as f64) * 100.0;
-        info!(
-            chunk_start,
-            chunk_end,
-            synced,
-            total,
-            logs = log_count,
-            pct = format!("{:.1}%", pct),
-            "Synced batch"
-        );
+    // Ensure partitions exist for the range
+    partitions.ensure_partition(start_block).await?;
+    if to > 0 {
+        partitions.ensure_partition(to).await?;
     }
 
-    info!(synced, total_logs, "Forward sync complete");
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+
+    // Set up Ctrl+C handler
+    let shutdown_tx_clone = shutdown_tx.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Received Ctrl+C, shutting down gracefully...");
+        let _ = shutdown_tx_clone.send(());
+    });
+
+    let synced = engine.backfill(start_block, to, batch_size, shutdown_rx).await?;
+
+    info!(
+        synced = synced,
+        from = start_block,
+        to = to,
+        "Backfill complete"
+    );
+
+    Ok(())
+}
+
+async fn run_status(pool: &db::Pool, rpc_url: &str) -> Result<()> {
+    let rpc = RpcClient::new(rpc_url);
+    let chain_id = rpc.chain_id().await?;
+    let remote_head = rpc.latest_block_number().await?;
+
+    let state = load_sync_state(pool).await?.unwrap_or_default();
+
+    let (low, high) = state.indexed_range();
+    let indexed_blocks = if high >= low { high - low + 1 } else { 0 };
+
+    println!("=== AK47 Sync Status ===");
+    println!();
+    println!("Chain:          {} ({})", chain_name(chain_id), chain_id);
+    println!("Remote head:    {}", remote_head);
+    println!();
+    println!("Forward sync:");
+    println!("  Synced to:    {}", state.synced_num);
+    println!("  Head lag:     {} blocks", remote_head.saturating_sub(state.synced_num));
+    println!();
+    println!("Backfill:");
+    match state.backfill_num {
+        None => println!("  Status:       Not started"),
+        Some(0) => println!("  Status:       Complete (reached genesis)"),
+        Some(n) => {
+            println!("  Status:       In progress");
+            println!("  Backfilled to: {}", n);
+            println!("  Remaining:    {} blocks to genesis", n);
+        }
+    }
+    println!();
+    println!("Coverage:");
+    println!("  Indexed range: {} - {}", low, high);
+    println!("  Total blocks:  {}", indexed_blocks);
+
+    // Check for gaps
+    let gaps = crate::sync::writer::detect_gaps(pool).await?;
+    if gaps.is_empty() {
+        println!("  Gaps:         None");
+    } else {
+        println!("  Gaps:         {} gap(s) detected", gaps.len());
+        for (start, end) in &gaps {
+            println!("    - {} to {} ({} blocks)", start, end, end - start + 1);
+        }
+    }
+
     Ok(())
 }
