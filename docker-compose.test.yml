@@ -44,10 +44,10 @@ services:
     build: .
     command:
       - up
-      - --rpc
-      - "http://tempo:8545"
-      - --db
-      - "postgres://ak47:ak47@timescaledb:5432/ak47_test"
+      - --config
+      - /config.toml
+    volumes:
+      - ./config.test.toml:/config.toml:ro
     depends_on:
       timescaledb:
         condition: service_healthy

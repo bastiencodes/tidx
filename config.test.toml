@@ -1,0 +1,14 @@
+# AK47 Test Configuration
+
+database_url = "postgres://ak47:ak47@timescaledb:5432/ak47_test"
+
+port = 8080
+bind = "0.0.0.0"
+metrics_port = 9090
+
+[[chains]]
+name = "dev"
+chain_id = 1337
+rpc_url = "http://tempo:8545"
+backfill = true
+batch_size = 100
