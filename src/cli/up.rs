@@ -5,19 +5,14 @@ use std::net::SocketAddr;
 use tracing::info;
 
 use ak47::api;
-use ak47::config::Config;
 use ak47::db;
 use ak47::sync::engine::SyncEngine;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Chain name (presto, andantino, moderato) - uses preset RPC URL
+    /// Chain to index (presto, andantino, moderato)
     #[arg(long, env = "AK47_CHAIN")]
-    pub chain: Option<String>,
-
-    /// RPC endpoint URL (overrides --chain)
-    #[arg(long, env = "AK47_RPC_URL")]
-    pub rpc: Option<String>,
+    pub chain: String,
 
     /// Database URL
     #[arg(long, env = "AK47_DATABASE_URL")]
@@ -34,31 +29,26 @@ pub struct Args {
     /// Metrics port (0 to disable)
     #[arg(long, default_value = "9090")]
     pub metrics_port: u16,
+
+    /// Disable automatic backfill to genesis
+    #[arg(long)]
+    pub no_backfill: bool,
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let rpc_url = match (&args.rpc, &args.chain) {
-        (Some(rpc), _) => rpc.clone(),
-        (None, Some(chain_name)) => {
-            let chain = ak47::config::get_chain(chain_name)
-                .ok_or_else(|| anyhow::anyhow!(
-                    "Unknown chain '{}'. Available: presto, andantino, moderato",
-                    chain_name
-                ))?;
-            info!(chain = chain.name, rpc = chain.rpc_url, "Using preset chain config");
-            chain.rpc_url.to_string()
-        }
-        (None, None) => {
-            return Err(anyhow::anyhow!(
-                "Either --chain or --rpc must be specified"
-            ));
-        }
-    };
+    let chain = ak47::config::get_chain(&args.chain).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown chain '{}'. Available: presto, andantino, moderato",
+            args.chain
+        )
+    })?;
 
-    let config = Config {
-        rpc_url,
-        database_url: args.db,
-    };
+    info!(
+        chain = chain.name,
+        chain_id = chain.chain_id,
+        rpc = chain.rpc_url,
+        "Starting ak47"
+    );
 
     if args.metrics_port > 0 {
         let metrics_addr: SocketAddr = format!("{}:{}", args.bind, args.metrics_port).parse()?;
@@ -69,7 +59,7 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     info!("Connecting to database...");
-    let pool = db::create_pool(&config.database_url).await?;
+    let pool = db::create_pool(&args.db).await?;
 
     info!("Running migrations...");
     db::run_migrations(&pool).await?;
@@ -104,8 +94,34 @@ pub async fn run(args: Args) -> Result<()> {
         });
     }
 
-    info!("Starting sync engine...");
-    let mut engine = SyncEngine::new(pool, &config.rpc_url).await?;
+    let engine = SyncEngine::new(pool.clone(), chain.rpc_url).await?;
 
+    // Start backfill task if needed
+    if !args.no_backfill {
+        let state = engine.status().await?;
+        if !state.backfill_complete() {
+            info!("Starting background backfill to genesis");
+            let backfill_engine = SyncEngine::new(pool, chain.rpc_url).await?;
+            let backfill_shutdown = shutdown_tx.subscribe();
+
+            tokio::spawn(async move {
+                let start = if state.backfill_num.is_some() {
+                    state.backfill_num.unwrap()
+                } else {
+                    state.synced_num
+                };
+
+                if let Err(e) = backfill_engine
+                    .backfill(start, 0, 100, backfill_shutdown)
+                    .await
+                {
+                    tracing::error!(error = %e, "Backfill failed");
+                }
+            });
+        }
+    }
+
+    info!("Starting sync engine...");
+    let mut engine = SyncEngine::new(engine.pool().clone(), chain.rpc_url).await?;
     engine.run(shutdown_rx).await
 }

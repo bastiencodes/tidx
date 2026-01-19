@@ -8,17 +8,13 @@ use ak47::sync::fetcher::RpcClient;
 
 #[derive(ClapArgs)]
 pub struct Args {
+    /// Chain (presto, andantino, moderato)
+    #[arg(long, env = "AK47_CHAIN")]
+    pub chain: String,
+
     /// Database URL
     #[arg(long, env = "AK47_DATABASE_URL")]
     pub db: String,
-
-    /// Chain name (presto, andantino, moderato) - uses preset RPC URL
-    #[arg(long, env = "AK47_CHAIN")]
-    pub chain: Option<String>,
-
-    /// RPC endpoint URL (for live head, overrides --chain)
-    #[arg(long, env = "AK47_RPC_URL")]
-    pub rpc: Option<String>,
 
     /// Watch mode - continuously update status
     #[arg(long, short)]
@@ -30,21 +26,19 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
+    let chain = ak47::config::get_chain(&args.chain).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Unknown chain '{}'. Available: presto, andantino, moderato",
+            args.chain
+        )
+    })?;
+
     let pool = db::create_pool(&args.db).await?;
-    let rpc_url = match (&args.rpc, &args.chain) {
-        (Some(rpc), _) => Some(rpc.clone()),
-        (None, Some(chain_name)) => ak47::config::get_chain(chain_name).map(|c| c.rpc_url.to_string()),
-        (None, None) => None,
-    };
-    let rpc = rpc_url.as_ref().map(|url| RpcClient::new(url));
+    let rpc = RpcClient::new(chain.rpc_url);
 
     loop {
         let status = service::get_status(&pool).await?;
-        let live_head = if let Some(ref rpc) = rpc {
-            rpc.latest_block_number().await.ok()
-        } else {
-            None
-        };
+        let live_head = rpc.latest_block_number().await.ok();
 
         if args.watch {
             print!("\x1B[2J\x1B[1;1H");

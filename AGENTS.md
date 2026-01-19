@@ -59,23 +59,14 @@ docker compose logs -f ak47
 
 ### Run (Local)
 ```bash
-# Start with preset chain config (presto, andantino, moderato)
+# Start indexing a chain (automatically backfills to genesis)
 cargo run -- up --chain andantino --db postgres://ak47:ak47@localhost:5432/ak47
 
-# Or with custom RPC URL
-cargo run -- up --rpc https://rpc.testnet.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47
+# Start without automatic backfill
+cargo run -- up --chain presto --db postgres://ak47:ak47@localhost:5432/ak47 --no-backfill
 
 # Check sync status (shows forward progress, backfill progress, gaps)
-cargo run -- status --db postgres://ak47:ak47@localhost:5432/ak47
-
-# Backfill from current position toward genesis (resumes if interrupted)
-cargo run -- sync --rpc https://rpc.testnet.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47 backfill --to 0
-
-# Backfill from specific block
-cargo run -- sync --rpc https://rpc.testnet.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47 backfill --from 10000 --to 0
-
-# Show sync status via sync command
-cargo run -- sync --rpc https://rpc.testnet.tempo.xyz --db postgres://ak47:ak47@localhost:5432/ak47 status
+cargo run -- status --chain andantino --db postgres://ak47:ak47@localhost:5432/ak47
 ```
 
 ### HTTP API Endpoints
