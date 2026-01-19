@@ -135,7 +135,12 @@ fn format_column(row: &tokio_postgres::Row, idx: usize) -> String {
                 return v.to_string();
             }
         }
-        "numeric" | "float4" | "float8" => {
+        "numeric" => {
+            if let Ok(v) = row.try_get::<_, rust_decimal::Decimal>(idx) {
+                return v.to_string();
+            }
+        }
+        "float4" | "float8" => {
             if let Ok(v) = row.try_get::<_, f64>(idx) {
                 return v.to_string();
             }

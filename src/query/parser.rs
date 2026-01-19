@@ -281,10 +281,10 @@ impl AbiType {
         match self {
             AbiType::Address => format!("abi_address(substring(data FROM {} FOR 32))", start),
             AbiType::Uint(_) => {
-                format!("abi_uint(substring(data FROM {} FOR 32))::text", start)
+                format!("abi_uint(substring(data FROM {} FOR 32))", start)
             }
             AbiType::Int(_) => {
-                format!("abi_int(substring(data FROM {} FOR 32))::text", start)
+                format!("abi_int(substring(data FROM {} FOR 32))", start)
             }
             AbiType::Bool => format!("abi_bool(substring(data FROM {} FOR 32))", start),
             AbiType::Bytes(Some(_)) | AbiType::Bytes(None) => {
@@ -352,7 +352,7 @@ mod tests {
         assert!(cte.contains("\"Transfer\""));
         assert!(cte.contains("abi_address(topics[2])"));
         assert!(cte.contains("abi_address(topics[3])"));
-        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))::text"));
+        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))"));
         assert!(cte.contains("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"));
     }
 
