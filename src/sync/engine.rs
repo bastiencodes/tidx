@@ -5,7 +5,6 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info};
 
-use crate::config::chain_name;
 use crate::db::Pool;
 use crate::metrics;
 use crate::types::SyncState;
@@ -28,11 +27,7 @@ impl SyncEngine {
         let rpc = RpcClient::new(rpc_url);
         let chain_id = rpc.chain_id().await?;
 
-        info!(
-            chain_id = chain_id,
-            network = chain_name(chain_id),
-            "Connected to chain"
-        );
+        info!(chain_id = chain_id, "Connected to chain");
 
         Ok(Self {
             pool,

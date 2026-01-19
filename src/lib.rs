@@ -8,6 +8,7 @@ pub mod sync;
 pub mod tempo;
 pub mod types;
 
+pub use config::Config;
 pub use db::{create_pool, run_migrations, Pool};
 pub use query::{AbiParam, AbiType, EventSignature};
 pub use service::{execute_query, get_status, QueryOptions, QueryResult, SyncStatus};

@@ -20,13 +20,13 @@ services:
     build: .
     command:
       - up
-      - --chain
-      - "${CHAIN:-andantino}"
-      - --db
-      - "postgres://ak47:${POSTGRES_PASSWORD:-ak47}@timescaledb:5432/ak47"
+      - --config
+      - /config.toml
     ports:
       - "8080:8080"   # HTTP API
       - "9090:9090"   # Prometheus metrics
+    volumes:
+      - ./config.toml:/config.toml:ro
     depends_on:
       timescaledb:
         condition: service_healthy

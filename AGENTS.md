@@ -42,11 +42,8 @@ docker run --rm --network host ghcr.io/tempoxyz/tempo-bench:latest \
 ### Run (Docker)
 ```bash
 # Production deployment with TimescaleDB, Prometheus, Grafana
-# Default chain: andantino (testnet)
+# Edit config.toml to configure chains
 docker compose up -d
-
-# Use a different chain (presto=mainnet, moderato)
-CHAIN=presto docker compose up -d
 
 # View logs
 docker compose logs -f ak47
@@ -59,14 +56,14 @@ docker compose logs -f ak47
 
 ### Run (Local)
 ```bash
-# Start indexing a chain (automatically backfills to genesis)
-cargo run -- up --chain andantino --db postgres://ak47:ak47@localhost:5432/ak47
+# Start indexing (reads from config.toml)
+cargo run -- up
 
-# Start without automatic backfill
-cargo run -- up --chain presto --db postgres://ak47:ak47@localhost:5432/ak47 --no-backfill
+# Use custom config file
+cargo run -- up --config /path/to/config.toml
 
-# Check sync status (shows forward progress, backfill progress, gaps)
-cargo run -- status --chain andantino --db postgres://ak47:ak47@localhost:5432/ak47
+# Check sync status
+cargo run -- status
 ```
 
 ### HTTP API Endpoints

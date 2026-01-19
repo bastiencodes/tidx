@@ -10,7 +10,6 @@ use crate::query::EventSignature;
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncStatus {
     pub chain_id: i64,
-    pub chain_name: String,
     pub head_num: i64,
     pub synced_num: i64,
     pub lag: i64,
@@ -27,24 +26,12 @@ pub async fn get_status(pool: &Pool) -> Result<Option<SyncStatus>> {
         )
         .await?;
 
-    Ok(row.map(|row| {
-        let chain_id: i64 = row.get(0);
-        let chain_name = match chain_id {
-            4217 => "Presto",
-            42429 => "Andantino",
-            42431 => "Moderato",
-            _ => "Unknown",
-        }
-        .to_string();
-
-        SyncStatus {
-            chain_id,
-            chain_name,
-            head_num: row.get(1),
-            synced_num: row.get(2),
-            lag: row.get::<_, i64>(1) - row.get::<_, i64>(2),
-            updated_at: row.get(3),
-        }
+    Ok(row.map(|row| SyncStatus {
+        chain_id: row.get(0),
+        head_num: row.get(1),
+        synced_num: row.get(2),
+        lag: row.get::<_, i64>(1) - row.get::<_, i64>(2),
+        updated_at: row.get(3),
     }))
 }
 

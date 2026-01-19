@@ -1,20 +1,17 @@
 use anyhow::Result;
-use chrono::Utc;
 use clap::Args as ClapArgs;
+use std::path::PathBuf;
 
+use ak47::config::Config;
 use ak47::db;
-use ak47::service;
 use ak47::sync::fetcher::RpcClient;
+use ak47::sync::writer::load_sync_state;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Chain (presto, andantino, moderato)
-    #[arg(long, env = "AK47_CHAIN")]
-    pub chain: String,
-
-    /// Database URL
-    #[arg(long, env = "AK47_DATABASE_URL")]
-    pub db: String,
+    /// Path to config file
+    #[arg(short, long, default_value = "config.toml")]
+    pub config: PathBuf,
 
     /// Watch mode - continuously update status
     #[arg(long, short)]
@@ -26,48 +23,48 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let chain = ak47::config::get_chain(&args.chain).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Unknown chain '{}'. Available: presto, andantino, moderato",
-            args.chain
-        )
-    })?;
-
-    let pool = db::create_pool(&args.db).await?;
-    let rpc = RpcClient::new(chain.rpc_url);
+    let config = Config::load(&args.config)?;
+    let pool = db::create_pool(&config.database_url).await?;
 
     loop {
-        let status = service::get_status(&pool).await?;
-        let live_head = rpc.latest_block_number().await.ok();
-
         if args.watch {
             print!("\x1B[2J\x1B[1;1H");
         }
 
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&status)?);
-        } else {
-            println!("AK47 Status");
-            println!("═══════════════════════════════════════");
+        println!("AK47 Status");
+        println!("═══════════════════════════════════════");
 
-            match status {
-                Some(s) => {
-                    let age = Utc::now().signed_duration_since(s.updated_at);
-                    let head = live_head.unwrap_or(s.head_num as u64);
-                    let lag = head.saturating_sub(s.synced_num as u64);
+        let state = load_sync_state(&pool).await?.unwrap_or_default();
 
-                    println!("Network:    {} ({})", s.chain_name, s.chain_id);
-                    println!("Head:       {}{}", head, if live_head.is_some() { " (live)" } else { "" });
-                    println!("Synced:     {}", s.synced_num);
-                    println!("Lag:        {} blocks", lag);
-                    println!(
-                        "Updated:    {} ({} ago)",
-                        s.updated_at.format("%H:%M:%S"),
-                        format_duration(age)
-                    );
+        for chain in &config.chains {
+            let rpc = RpcClient::new(&chain.rpc_url);
+            let live_head = rpc.latest_block_number().await.ok();
+
+            println!();
+            println!("Chain: {} ({})", chain.name, chain.chain_id);
+            println!("───────────────────────────────────────");
+
+            if state.chain_id == chain.chain_id {
+                let head = live_head.unwrap_or(state.head_num);
+                let lag = head.saturating_sub(state.synced_num);
+
+                println!(
+                    "  Head:       {}{}",
+                    head,
+                    if live_head.is_some() { " (live)" } else { "" }
+                );
+                println!("  Synced:     {}", state.synced_num);
+                println!("  Lag:        {} blocks", lag);
+
+                match state.backfill_num {
+                    None => println!("  Backfill:   Not started"),
+                    Some(0) => println!("  Backfill:   Complete"),
+                    Some(n) => println!("  Backfill:   {} blocks remaining", n),
                 }
-                None => {
-                    println!("No sync state found. Run 'ak47 up' to start syncing.");
+            } else {
+                println!("  Status:     Not syncing (chain_id mismatch in sync_state)");
+                if let Some(head) = live_head {
+                    println!("  Head:       {} (live)", head);
                 }
             }
         }
@@ -80,15 +77,4 @@ pub async fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn format_duration(d: chrono::Duration) -> String {
-    let secs = d.num_seconds();
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    }
 }
