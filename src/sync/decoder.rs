@@ -65,7 +65,7 @@ pub fn decode_transaction(tx: &TempoTransaction, block: &TempoBlock, idx: u32) -
 }
 
 pub fn decode_log(log: &TempoLog, block_timestamp: DateTime<Utc>) -> LogRow {
-    let selector = log.selector().map(|s| s.as_slice().to_vec());
+    let selector = log.selector().map(|s| s.as_slice()[0..4].to_vec());
     let topics: Vec<Vec<u8>> = log.topics.iter().map(|t| t.as_slice().to_vec()).collect();
 
     LogRow {

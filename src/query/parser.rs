@@ -53,7 +53,7 @@ impl EventSignature {
 
     pub fn to_cte_sql(&self) -> String {
         let mut selects = Vec::new();
-        let mut topic_idx = 1; // topic0 is the selector
+        let mut topic_idx = 2; // topic0 is selector (topics[1] in PG), first indexed param is topics[2]
         let mut data_offset = 0;
 
         for (i, param) in self.params.iter().enumerate() {
@@ -280,8 +280,11 @@ impl AbiType {
         let start = offset + 1;
         match self {
             AbiType::Address => format!("abi_address(substring(data FROM {} FOR 32))", start),
-            AbiType::Uint(_) | AbiType::Int(_) => {
-                format!("abi_uint(substring(data FROM {} FOR 32))", start)
+            AbiType::Uint(_) => {
+                format!("abi_uint(substring(data FROM {} FOR 32))::text", start)
+            }
+            AbiType::Int(_) => {
+                format!("abi_int(substring(data FROM {} FOR 32))::text", start)
             }
             AbiType::Bool => format!("abi_bool(substring(data FROM {} FOR 32))", start),
             AbiType::Bytes(Some(_)) | AbiType::Bytes(None) => {
@@ -347,9 +350,9 @@ mod tests {
         .unwrap();
         let cte = sig.to_cte_sql();
         assert!(cte.contains("\"Transfer\""));
-        assert!(cte.contains("abi_address(topics[1])"));
         assert!(cte.contains("abi_address(topics[2])"));
-        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))"));
+        assert!(cte.contains("abi_address(topics[3])"));
+        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))::text"));
         assert!(cte.contains("ddf252ad"));
     }
 

@@ -1,11 +1,13 @@
 use anyhow::Result;
+use chrono::{TimeZone, Utc};
 use clap::{Args as ClapArgs, Subcommand};
+use std::collections::HashMap;
 use tracing::info;
 
 use crate::db::{self, PartitionManager};
-use crate::sync::decoder::{decode_block, decode_transaction};
+use crate::sync::decoder::{decode_block, decode_log, decode_transaction};
 use crate::sync::fetcher::RpcClient;
-use crate::sync::writer::{write_block, write_txs};
+use crate::sync::writer::{write_block, write_logs, write_txs};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -16,6 +18,10 @@ pub struct Args {
     /// Database URL
     #[arg(long, env = "AK47_DATABASE_URL")]
     pub db: String,
+
+    /// Skip running migrations
+    #[arg(long)]
+    pub skip_migrations: bool,
 
     #[command(subcommand)]
     pub command: SyncCommands,
@@ -41,7 +47,9 @@ pub enum SyncCommands {
 
 pub async fn run(args: Args) -> Result<()> {
     let pool = db::create_pool(&args.db).await?;
-    db::run_migrations(&pool).await?;
+    if !args.skip_migrations {
+        db::run_migrations(&pool).await?;
+    }
 
     let rpc = RpcClient::new(&args.rpc);
     let partitions = PartitionManager::new(pool.clone());
@@ -70,6 +78,7 @@ async fn run_forward(
     info!(from, to, batch_size, "Starting forward sync");
 
     let mut synced = 0u64;
+    let mut total_logs = 0u64;
     let total = to - from + 1;
 
     for chunk_start in (from..=to).step_by(batch_size as usize) {
@@ -77,7 +86,18 @@ async fn run_forward(
 
         partitions.ensure_partition(chunk_end).await?;
 
-        let blocks = rpc.get_blocks_batch(chunk_start..=chunk_end).await?;
+        let (blocks, receipts) = tokio::try_join!(
+            rpc.get_blocks_batch(chunk_start..=chunk_end),
+            rpc.get_receipts_batch(chunk_start..=chunk_end)
+        )?;
+
+        let block_timestamps: HashMap<u64, _> = blocks
+            .iter()
+            .map(|b| {
+                let ts = Utc.timestamp_opt(b.timestamp_u64() as i64, 0).unwrap();
+                (b.number_u64(), ts)
+            })
+            .collect();
 
         for block in &blocks {
             let block_row = decode_block(block);
@@ -92,6 +112,23 @@ async fn run_forward(
             write_txs(pool, &txs).await?;
         }
 
+        let all_logs: Vec<_> = receipts
+            .iter()
+            .flatten()
+            .flat_map(|receipt| {
+                let block_num = receipt.block_number.to::<u64>();
+                block_timestamps
+                    .get(&block_num)
+                    .map(|&ts| receipt.logs.iter().map(move |log| decode_log(log, ts)))
+                    .into_iter()
+                    .flatten()
+            })
+            .collect();
+
+        let log_count = all_logs.len();
+        write_logs(pool, &all_logs).await?;
+        total_logs += log_count as u64;
+
         synced += blocks.len() as u64;
         let pct = (synced as f64 / total as f64) * 100.0;
         info!(
@@ -99,11 +136,12 @@ async fn run_forward(
             chunk_end,
             synced,
             total,
+            logs = log_count,
             pct = format!("{:.1}%", pct),
             "Synced batch"
         );
     }
 
-    info!(synced, "Forward sync complete");
+    info!(synced, total_logs, "Forward sync complete");
     Ok(())
 }
