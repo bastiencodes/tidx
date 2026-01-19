@@ -408,3 +408,138 @@ async fn test_gap_detection_empty_table() {
 
     assert!(gaps.is_empty(), "Empty table should have no gaps");
 }
+
+// ============================================================================
+// Receipt indexing tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_sync_receipts() {
+    let tempo = TempoNode::from_env();
+    tempo.wait_for_ready().await.expect("Tempo node not ready");
+
+    let db = TestDb::empty().await;
+    db.truncate_all().await;
+
+    tempo.wait_for_block(50).await.expect("Block 50 not reached");
+
+    let engine = SyncEngine::new(db.pool.clone(), &tempo.rpc_url)
+        .await
+        .expect("Failed to create sync engine");
+
+    // Sync blocks 1-50
+    for block_num in 1..=50 {
+        engine
+            .sync_block(block_num)
+            .await
+            .expect(&format!("Failed to sync block {}", block_num));
+    }
+
+    let conn = db.pool.get().await.expect("Failed to get connection");
+
+    // Verify receipts were synced
+    let receipt_count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM receipts", &[])
+        .await
+        .expect("Failed to count receipts")
+        .get(0);
+
+    let tx_count: i64 = conn
+        .query_one("SELECT COUNT(*) FROM txs", &[])
+        .await
+        .expect("Failed to count txs")
+        .get(0);
+
+    println!("Synced {} receipts from blocks 1-50 (txs: {})", receipt_count, tx_count);
+
+    // Each transaction should have exactly one receipt
+    assert_eq!(receipt_count, tx_count, "Receipt count should match tx count");
+
+    // If we have receipts, verify structure is correct
+    if receipt_count > 0 {
+        let receipt = conn
+            .query_opt(
+                r#"SELECT block_num, tx_idx, tx_hash, "from", gas_used, status 
+                   FROM receipts WHERE block_num BETWEEN 1 AND 50 LIMIT 1"#,
+                &[],
+            )
+            .await
+            .expect("Failed to query receipt");
+
+        if let Some(r) = receipt {
+            let tx_hash: Vec<u8> = r.get(2);
+            let from_addr: Vec<u8> = r.get(3);
+            let gas_used: i64 = r.get(4);
+
+            assert_eq!(tx_hash.len(), 32, "Tx hash should be 32 bytes");
+            assert_eq!(from_addr.len(), 20, "From address should be 20 bytes");
+            assert!(gas_used > 0, "Gas used should be positive");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_receipt_tx_hash_matches() {
+    let db = TestDb::new().await;
+
+    let conn = db.pool.get().await.expect("Failed to get connection");
+
+    // Verify receipt tx_hash matches corresponding tx hash
+    let mismatches: i64 = conn
+        .query_one(
+            r#"
+            SELECT COUNT(*) FROM receipts r
+            JOIN txs t ON r.block_num = t.block_num AND r.tx_idx = t.idx
+            WHERE r.tx_hash != t.hash
+            "#,
+            &[],
+        )
+        .await
+        .expect("Failed to check hash matches")
+        .get(0);
+
+    assert_eq!(mismatches, 0, "All receipt tx_hashes should match tx hashes");
+}
+
+#[tokio::test]
+async fn test_seeded_receipt_stats() {
+    let db = TestDb::new().await;
+
+    let receipts = db.receipt_count().await;
+    let txs = db.tx_count().await;
+
+    println!("=== Receipt Stats ===");
+    println!("Receipts: {}", receipts);
+    println!("Transactions: {}", txs);
+
+    assert_eq!(receipts, txs, "Should have one receipt per transaction");
+
+    let conn = db.pool.get().await.expect("Failed to get connection");
+
+    // Check fee_payer distribution (sponsored txs have fee_payer != from)
+    let sponsored: i64 = conn
+        .query_one(
+            r#"SELECT COUNT(*) FROM receipts WHERE fee_payer IS NOT NULL AND fee_payer != "from""#,
+            &[],
+        )
+        .await
+        .expect("Failed to count sponsored txs")
+        .get(0);
+
+    println!("Sponsored txs (fee_payer != from): {}", sponsored);
+
+    // Check status distribution
+    let success: i64 = conn
+        .query_one("SELECT COUNT(*) FROM receipts WHERE status = 1", &[])
+        .await
+        .expect("Failed to count success")
+        .get(0);
+
+    let failed: i64 = conn
+        .query_one("SELECT COUNT(*) FROM receipts WHERE status = 0", &[])
+        .await
+        .expect("Failed to count failed")
+        .get(0);
+
+    println!("Success: {}, Failed: {}", success, failed);
+}

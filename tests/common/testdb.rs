@@ -96,7 +96,7 @@ impl TestDb {
 
     pub async fn truncate_all(&self) {
         let conn = self.pool.get().await.expect("Failed to get connection");
-        conn.batch_execute("TRUNCATE blocks, txs, logs, sync_state CASCADE")
+        conn.batch_execute("TRUNCATE blocks, txs, logs, receipts, sync_state CASCADE")
             .await
             .expect("Failed to truncate tables");
     }
@@ -122,6 +122,14 @@ impl TestDb {
         conn.query_one("SELECT COUNT(*) FROM logs", &[])
             .await
             .expect("Failed to count logs")
+            .get(0)
+    }
+
+    pub async fn receipt_count(&self) -> i64 {
+        let conn = self.pool.get().await.expect("Failed to get connection");
+        conn.query_one("SELECT COUNT(*) FROM receipts", &[])
+            .await
+            .expect("Failed to count receipts")
             .get(0)
     }
 }
