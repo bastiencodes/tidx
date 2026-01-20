@@ -1,6 +1,7 @@
 mod auth;
 mod materialize;
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -8,7 +9,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::{
-        sse::{Event as SseEvent, KeepAlive},
+        sse::{Event as SseEvent, KeepAlive, KeepAliveStream},
         IntoResponse, Response, Sse,
     },
     routing::{delete, get, post},
@@ -27,25 +28,36 @@ pub use auth::AdminApiKey;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool: Pool,
+    /// Map of chain_id -> pool
+    pub pools: HashMap<u64, Pool>,
+    /// Default chain_id (first chain)
+    pub default_chain_id: u64,
     pub broadcaster: Arc<Broadcaster>,
 }
 
-pub fn router(pool: Pool, broadcaster: Arc<Broadcaster>) -> Router {
-    router_with_admin_key(pool, broadcaster, None)
+impl AppState {
+    fn get_pool(&self, chain_id: Option<u64>) -> Option<&Pool> {
+        let id = chain_id.unwrap_or(self.default_chain_id);
+        self.pools.get(&id)
+    }
+}
+
+pub fn router(pools: HashMap<u64, Pool>, default_chain_id: u64, broadcaster: Arc<Broadcaster>) -> Router {
+    router_with_admin_key(pools, default_chain_id, broadcaster, None)
 }
 
 pub fn router_with_admin_key(
-    pool: Pool,
+    pools: HashMap<u64, Pool>,
+    default_chain_id: u64,
     broadcaster: Arc<Broadcaster>,
     admin_api_key: Option<String>,
 ) -> Router {
-    let state = AppState { pool, broadcaster };
+    let state = AppState { pools, default_chain_id, broadcaster };
 
     let mut router = Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
-        .route("/query", post(handle_query).get(handle_query_live_get))
+        .route("/query", get(handle_query))
         .route("/logs/{signature}", get(handle_logs));
 
     // Add protected /materialize routes if admin key is configured
@@ -76,23 +88,38 @@ struct StatusResponse {
 }
 
 async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusResponse>, ApiError> {
-    let chains = crate::service::get_all_status(&state.pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Aggregate status from all chains
+    let mut all_chains = Vec::new();
+    for pool in state.pools.values() {
+        if let Ok(chains) = crate::service::get_all_status(pool).await {
+            all_chains.extend(chains);
+        }
+    }
 
     Ok(Json(StatusResponse {
         ok: true,
-        chains,
+        chains: all_chains,
     }))
 }
 
 #[derive(Deserialize)]
-pub struct QueryRequest {
+pub struct QueryParams {
+    /// SQL query (SELECT only)
     sql: String,
+    /// Event signature to create a CTE
     #[serde(default)]
     signature: Option<String>,
+    /// Chain ID to query (uses default if not specified)
+    #[serde(default, alias = "chain_id")]
+    #[serde(rename = "chainId")]
+    chain_id: Option<u64>,
+    /// Enable live streaming mode (SSE)
+    #[serde(default)]
+    live: bool,
+    /// Query timeout in milliseconds
     #[serde(default = "default_timeout")]
     timeout_ms: u64,
+    /// Maximum rows to return
     #[serde(default = "default_limit")]
     limit: i64,
 }
@@ -111,37 +138,38 @@ struct QueryResponse {
     ok: bool,
 }
 
-#[derive(Deserialize)]
-pub struct QueryParams {
-    #[serde(default)]
-    live: bool,
-}
-
 async fn handle_query(
     State(state): State<AppState>,
     Query(params): Query<QueryParams>,
-    Json(req): Json<QueryRequest>,
 ) -> Response {
     if params.live {
-        handle_query_live(state, req).await.into_response()
+        handle_query_live(state, params).await.into_response()
     } else {
-        handle_query_once(state, req).await.into_response()
+        handle_query_once(state, params).await.into_response()
     }
 }
 
 async fn handle_query_once(
     state: AppState,
-    req: QueryRequest,
+    params: QueryParams,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    let pool = state
+        .get_pool(params.chain_id)
+        .ok_or_else(|| ApiError::BadRequest(format!(
+            "Unknown chain_id: {}. Available: {:?}",
+            params.chain_id.unwrap_or(state.default_chain_id),
+            state.pools.keys().collect::<Vec<_>>()
+        )))?;
+
     let options = QueryOptions {
-        timeout_ms: req.timeout_ms.clamp(100, 30000), // 100ms - 30s
-        limit: req.limit.clamp(1, 100000),            // 1 - 100k rows
+        timeout_ms: params.timeout_ms.clamp(100, 30000),
+        limit: params.limit.clamp(1, 100000),
     };
 
     let result = crate::service::execute_query(
-        &state.pool,
-        &req.sql,
-        req.signature.as_deref(),
+        pool,
+        &params.sql,
+        params.signature.as_deref(),
         &options,
     )
     .await
@@ -159,23 +187,37 @@ async fn handle_query_once(
     Ok(Json(QueryResponse { result, ok: true }))
 }
 
+type SseStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
+
 async fn handle_query_live(
     state: AppState,
-    req: QueryRequest,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    params: QueryParams,
+) -> Sse<KeepAliveStream<SseStream>> {
+    let pool = match state.get_pool(params.chain_id) {
+        Some(p) => p.clone(),
+        None => {
+            let stream: SseStream = Box::pin(async_stream::stream! {
+                yield Ok(SseEvent::default()
+                    .event("error")
+                    .json_data(serde_json::json!({ "ok": false, "error": "Unknown chain_id" }))
+                    .unwrap());
+            });
+            return Sse::new(stream).keep_alive(KeepAlive::default());
+        }
+    };
+
     let mut rx = state.broadcaster.subscribe();
-    let pool = state.pool;
-    let sql = req.sql;
-    let signature = req.signature;
+    let sql = params.sql;
+    let signature = params.signature;
     let options = QueryOptions {
-        timeout_ms: req.timeout_ms.clamp(100, 30000),
-        limit: req.limit.clamp(1, 100000),
+        timeout_ms: params.timeout_ms.clamp(100, 30000),
+        limit: params.limit.clamp(1, 100000),
     };
 
     let stream = async_stream::stream! {
         let mut last_block_num: u64 = 0;
 
-        // Execute initial query to get current state and determine starting block
+        // Execute initial query
         match crate::service::execute_query(&pool, &sql, signature.as_deref(), &options).await {
             Ok(result) => {
                 yield Ok(SseEvent::default()
@@ -192,7 +234,7 @@ async fn handle_query_live(
             }
         }
 
-        // Get current head block to set baseline (use first chain's synced_num)
+        // Get current head block
         if let Ok(statuses) = crate::service::get_all_status(&pool).await {
             if let Some(s) = statuses.first() {
                 last_block_num = s.synced_num as u64;
@@ -207,7 +249,6 @@ async fn handle_query_live(
                         continue;
                     }
 
-                    // Interpolate: emit events for each block from last+1 to current
                     let start = last_block_num + 1;
                     let end = update.block_num;
 
@@ -244,31 +285,8 @@ async fn handle_query_live(
         }
     };
 
+    let stream: SseStream = Box::pin(stream);
     Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
-#[derive(Deserialize)]
-pub struct QueryLiveGetParams {
-    sql: String,
-    #[serde(default)]
-    signature: Option<String>,
-    #[serde(default = "default_timeout")]
-    timeout_ms: u64,
-    #[serde(default = "default_limit")]
-    limit: i64,
-}
-
-async fn handle_query_live_get(
-    State(state): State<AppState>,
-    Query(params): Query<QueryLiveGetParams>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let req = QueryRequest {
-        sql: params.sql,
-        signature: params.signature,
-        timeout_ms: params.timeout_ms,
-        limit: params.limit,
-    };
-    handle_query_live(state, req).await
 }
 
 #[derive(Deserialize)]
@@ -277,6 +295,8 @@ pub struct LogsQuery {
     limit: i64,
     #[serde(default)]
     after: Option<String>,
+    #[serde(default, alias = "chain_id", rename = "chainId")]
+    chain_id: Option<u64>,
 }
 
 async fn handle_logs(
@@ -284,6 +304,10 @@ async fn handle_logs(
     Path(signature): Path<String>,
     Query(params): Query<LogsQuery>,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    let pool = state
+        .get_pool(params.chain_id)
+        .ok_or_else(|| ApiError::BadRequest("Unknown chain_id".into()))?;
+
     let time_filter = if let Some(ref after) = params.after {
         parse_time_filter(after)?
     } else {
@@ -304,7 +328,7 @@ async fn handle_logs(
         limit: params.limit.clamp(1, 10000),
     };
 
-    let result = crate::service::execute_query(&state.pool, &sql, Some(&signature), &options)
+    let result = crate::service::execute_query(pool, &sql, Some(&signature), &options)
         .await
         .map_err(|e| ApiError::QueryError(e.to_string()))?;
 

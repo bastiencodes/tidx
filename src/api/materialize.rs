@@ -46,8 +46,11 @@ pub async fn handle_create_view(
     let view_name = validate_and_build_name(&req.name)?;
     validate_query(&req.query)?;
 
-    let conn = state
-        .pool
+    let pool = state
+        .get_pool(None)
+        .ok_or_else(|| ApiError::Internal("No database configured".into()))?;
+
+    let conn = pool
         .get()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -105,7 +108,11 @@ pub async fn handle_list_views(
     _auth: AdminAuth,
     State(state): State<AppState>,
 ) -> Result<Json<ListViewsResponse>, ApiError> {
-    let views = crate::db::list_materialized_views(&state.pool)
+    let pool = state
+        .get_pool(None)
+        .ok_or_else(|| ApiError::Internal("No database configured".into()))?;
+
+    let views = crate::db::list_materialized_views(pool)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -119,8 +126,11 @@ pub async fn handle_delete_view(
 ) -> Result<Json<DeleteViewResponse>, ApiError> {
     let view_name = validate_and_build_name(&req.name)?;
 
-    let conn = state
-        .pool
+    let pool = state
+        .get_pool(None)
+        .ok_or_else(|| ApiError::Internal("No database configured".into()))?;
+
+    let conn = pool
         .get()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;

@@ -52,6 +52,9 @@ pub async fn run(args: Args) -> Result<()> {
 
     // Create pools and run migrations for each chain
     let mut chain_pools = Vec::new();
+    let mut pools_map = std::collections::HashMap::new();
+    let mut default_chain_id = 0u64;
+
     for chain in &config.chains {
         info!(chain = %chain.name, db = %chain.database_url, "Connecting to database...");
         let pool = db::create_pool(&chain.database_url).await?;
@@ -59,16 +62,20 @@ pub async fn run(args: Args) -> Result<()> {
         info!(chain = %chain.name, "Running migrations...");
         db::run_migrations(&pool).await?;
         
+        if default_chain_id == 0 {
+            default_chain_id = chain.chain_id;
+        }
+        pools_map.insert(chain.chain_id, pool.clone());
         chain_pools.push((chain.clone(), pool));
     }
 
-    // Start HTTP API with first chain's pool (for status queries)
-    // TODO: Could aggregate status across all chains
+    // Start HTTP API with all chain pools
     if config.http.enabled {
-        if let Some((_, first_pool)) = chain_pools.first() {
+        if !pools_map.is_empty() {
             let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
             let router = api::router_with_admin_key(
-                first_pool.clone(),
+                pools_map,
+                default_chain_id,
                 broadcaster.clone(),
                 config.http.admin_api_key.clone(),
             );
