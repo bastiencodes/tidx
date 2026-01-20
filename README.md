@@ -50,7 +50,7 @@
 ### Install
 
 ```bash
-curl -L https://ak47.tempo.xyz/install.sh | bash
+curl -L https://raw.githubusercontent.com/tempoxyz/ak47/main/scripts/install.sh | bash
 ```
 
 ### Run
@@ -125,7 +125,7 @@ Recent data stays in row format for fast writes and point queries. Older chunks 
 ### One-liner
 
 ```bash
-curl -L https://ak47.tempo.xyz/install.sh | bash
+curl -L https://raw.githubusercontent.com/tempoxyz/ak47/main/scripts/install.sh | bash
 ```
 
 ### Docker
@@ -269,7 +269,7 @@ ak47 materialize list
 | `/health` | GET | Health check |
 | `/status` | GET | Sync status for all chains |
 | `/query` | GET | Execute SQL query |
-| `/metrics` | GET | Prometheus metrics (port 9090) |
+| `/metrics` | GET | Prometheus metrics |
 
 ### Examples
 
