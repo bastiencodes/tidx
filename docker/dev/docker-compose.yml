@@ -56,9 +56,12 @@ services:
       - up
       - --config
       - /config.toml
+    ports:
+      - "8080:8080"   # HTTP API
+      - "9090:9090"   # Prometheus metrics
     volumes:
       - ./config.toml:/config.toml:ro
-      - duckdb_data:/data
+      - duckdb_data:/data  # DuckDB storage
     depends_on:
       postgres:
         condition: service_healthy

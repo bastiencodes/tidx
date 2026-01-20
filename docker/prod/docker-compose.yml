@@ -9,6 +9,18 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - synchronous_commit=off
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=64MB
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ak47 -d ak47"]
       interval: 5s
@@ -17,9 +29,7 @@ services:
     restart: unless-stopped
 
   ak47:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
+    image: ghcr.io/tempoxyz/ak47:latest
     command:
       - up
       - --config
@@ -29,7 +39,7 @@ services:
       - "9090:9090"   # Prometheus metrics
     volumes:
       - ./config.toml:/config.toml:ro
-      - duckdb_data:/data
+      - duckdb_data:/data  # DuckDB storage (per-chain files)
     depends_on:
       postgres:
         condition: service_healthy
@@ -37,6 +47,37 @@ services:
       RUST_LOG: ${RUST_LOG:-ak47=info}
     restart: unless-stopped
 
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
 volumes:
   postgres_data:
   duckdb_data:
+  prometheus_data:
+  grafana_data:

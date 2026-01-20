@@ -211,7 +211,7 @@ cargo build --release
 
 ## Configuration
 
-ak47 uses a TOML config file. Each `[[chains]]` block creates a separate database:
+ak47 uses a TOML config file. Each `[[chains]]` block defines a chain to index:
 
 ```toml
 # config.toml
@@ -219,6 +219,7 @@ ak47 uses a TOML config file. Each `[[chains]]` block creates a separate databas
 [http]
 enabled = true
 port = 8080
+bind = "0.0.0.0"
 
 [prometheus]
 enabled = true
@@ -229,13 +230,46 @@ name = "mainnet"
 chain_id = 4217
 rpc_url = "https://rpc.tempo.xyz"
 database_url = "postgres://user:pass@localhost:5432/ak47_mainnet"
+duckdb_path = "/data/mainnet.duckdb"  # Optional: enables OLAP queries
+backfill = true
+batch_size = 100
 
 [[chains]]
 name = "moderato"
-chain_id = 42429
+chain_id = 42431
 rpc_url = "https://rpc.moderato.tempo.xyz"
 database_url = "postgres://user:pass@localhost:5432/ak47_moderato"
+duckdb_path = "/data/moderato.duckdb"
 ```
+
+### Configuration Reference
+
+#### `[http]` — HTTP API Server
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable HTTP API server |
+| `port` | u16 | `8080` | HTTP server port |
+| `bind` | string | `"0.0.0.0"` | Bind address |
+
+#### `[prometheus]` — Metrics Server
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable Prometheus metrics endpoint |
+| `port` | u16 | `9090` | Metrics server port |
+
+#### `[[chains]]` — Chain Configuration (one per chain)
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | ✓ | - | Display name for logging |
+| `chain_id` | u64 | ✓ | - | Chain ID |
+| `rpc_url` | string | ✓ | - | JSON-RPC endpoint URL |
+| `database_url` | string | ✓ | - | PostgreSQL connection string |
+| `duckdb_path` | string | - | - | Path to DuckDB file (enables OLAP). Omit to disable DuckDB for this chain |
+| `backfill` | bool | - | `true` | Enable backfill to genesis |
+| `batch_size` | u64 | - | `100` | Blocks per RPC batch request |
 
 ## CLI Reference
 
@@ -246,7 +280,6 @@ Commands:
   up           Start syncing blocks from the chain (continuous) and serve HTTP API
   status       Show sync status
   query        Run a SQL query (use --signature to decode event logs)
-  materialize  Manage continuous aggregates (materialized views)
   help         Print this message or the help of the given subcommand(s)
 
 Options:
