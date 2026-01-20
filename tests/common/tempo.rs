@@ -82,6 +82,6 @@ impl TempoNode {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        anyhow::bail!("Timed out waiting for block {}", target)
+        anyhow::bail!("Timed out waiting for block {target}")
     }
 }

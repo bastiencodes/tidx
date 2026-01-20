@@ -67,7 +67,7 @@ async fn test_broadcaster_lagged_receiver() {
         broadcaster.send(BlockUpdate {
             chain_id: 4217,
             block_num: i,
-            block_hash: format!("0x{:064x}", i),
+            block_hash: format!("0x{i:064x}"),
             tx_count: 1,
             log_count: 1,
             timestamp: 1234567890 + i as i64,
@@ -80,7 +80,7 @@ async fn test_broadcaster_lagged_receiver() {
             assert!(n > 0, "should report skipped messages");
         }
         Ok(_) => panic!("expected lagged error"),
-        Err(e) => panic!("unexpected error: {:?}", e),
+        Err(e) => panic!("unexpected error: {e:?}"),
     }
 }
 

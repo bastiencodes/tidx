@@ -32,6 +32,11 @@ pub struct HttpConfig {
     /// Bind address (default: 0.0.0.0)
     #[serde(default = "default_bind")]
     pub bind: String,
+
+    /// Admin API key for protected endpoints (e.g., /materialize)
+    /// If not set, protected endpoints are disabled
+    #[serde(default)]
+    pub admin_api_key: Option<String>,
 }
 
 impl Default for HttpConfig {
@@ -40,6 +45,7 @@ impl Default for HttpConfig {
             enabled: true,
             port: 8080,
             bind: "0.0.0.0".to_string(),
+            admin_api_key: None,
         }
     }
 }

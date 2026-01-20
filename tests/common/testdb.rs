@@ -80,7 +80,7 @@ impl TestDb {
                 let head = tempo.block_number().await.unwrap_or(50).min(100);
                 for block_num in 1..=head {
                     if let Err(e) = engine.sync_block(block_num).await {
-                        println!("Warning: Failed to sync block {}: {}", block_num, e);
+                        println!("Warning: Failed to sync block {block_num}: {e}");
                     }
                 }
 

@@ -1,7 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use tokio::runtime::Runtime;
 
-use ak47::db::create_pool;
+use ak47::db::{create_pool, run_migrations};
 
 fn bench_oltp_queries(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -72,7 +72,7 @@ fn bench_oltp_queries(c: &mut Criterion) {
                 let conn = pool.get().await.unwrap();
                 let _rows = conn
                     .query(
-                        &format!("SELECT * FROM blocks ORDER BY num DESC LIMIT {}", n),
+                        &format!("SELECT * FROM blocks ORDER BY num DESC LIMIT {n}"),
                         &[],
                     )
                     .await
@@ -133,17 +133,6 @@ fn bench_olap_queries(c: &mut Criterion) {
         });
     });
 
-    // Aggregation from materialized view (pre-computed)
-    group.bench_function("count_txs_from_aggregate", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _row = conn
-                .query_one("SELECT COALESCE(SUM(tx_count), 0) FROM txs_daily", &[])
-                .await
-                .unwrap();
-        });
-    });
-
     // Group by aggregation (full scan)
     group.bench_function("txs_by_type_full", |b| {
         b.to_async(&rt).iter(|| async {
@@ -171,31 +160,6 @@ fn bench_olap_queries(c: &mut Criterion) {
         });
     });
 
-    // Hourly aggregate query (materialized view)
-    group.bench_function("hourly_stats_24h", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _rows = conn
-                .query(
-                    "SELECT * FROM txs_hourly ORDER BY bucket DESC LIMIT 24",
-                    &[],
-                )
-                .await
-                .unwrap();
-        });
-    });
-
-    // Daily aggregate (materialized view)
-    group.bench_function("daily_stats_7d", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _rows = conn
-                .query("SELECT * FROM txs_daily ORDER BY bucket DESC LIMIT 7", &[])
-                .await
-                .unwrap();
-        });
-    });
-
     // Top senders (full scan with group by)
     group.bench_function("top_senders_full", |b| {
         b.to_async(&rt).iter(|| async {
@@ -210,17 +174,7 @@ fn bench_olap_queries(c: &mut Criterion) {
         });
     });
 
-    // Unique senders from aggregate vs full scan
-    group.bench_function("unique_senders_from_aggregate", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _row = conn
-                .query_one("SELECT SUM(unique_senders) FROM txs_daily", &[])
-                .await
-                .unwrap();
-        });
-    });
-
+    // Unique senders (full scan)
     group.bench_function("unique_senders_full", |b| {
         b.to_async(&rt).iter(|| async {
             let conn = pool.get().await.unwrap();
@@ -231,7 +185,7 @@ fn bench_olap_queries(c: &mut Criterion) {
         });
     });
 
-    // Event analytics by selector
+    // Event analytics by selector (full scan)
     group.bench_function("top_events_full", |b| {
         b.to_async(&rt).iter(|| async {
             let conn = pool.get().await.unwrap();
@@ -245,14 +199,129 @@ fn bench_olap_queries(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("top_events_from_aggregate", |b| {
+    group.finish();
+}
+
+fn bench_olap_materialized(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://ak47:ak47@localhost:5433/ak47_test".to_string());
+
+    let pool = rt.block_on(async {
+        let pool = create_pool(&db_url).await.expect("Failed to create pool");
+        run_migrations(&pool).await.expect("Failed to run migrations");
+
+        // Create materialized views for benchmarking
+        let conn = pool.get().await.expect("Failed to get connection");
+
+        // Drop existing views first
+        conn.batch_execute(
+            r#"
+            DROP MATERIALIZED VIEW IF EXISTS mv_block_count;
+            DROP MATERIALIZED VIEW IF EXISTS mv_tx_count;
+            DROP MATERIALIZED VIEW IF EXISTS mv_txs_by_type;
+            DROP MATERIALIZED VIEW IF EXISTS mv_top_senders;
+            DROP MATERIALIZED VIEW IF EXISTS mv_unique_senders;
+            DROP MATERIALIZED VIEW IF EXISTS mv_top_events;
+            "#,
+        )
+        .await
+        .ok();
+
+        // Create materialized views
+        conn.batch_execute(
+            r#"
+            CREATE MATERIALIZED VIEW mv_block_count AS 
+            SELECT COUNT(*) as cnt FROM blocks;
+
+            CREATE MATERIALIZED VIEW mv_tx_count AS 
+            SELECT COUNT(*) as cnt FROM txs;
+
+            CREATE MATERIALIZED VIEW mv_txs_by_type AS 
+            SELECT type, COUNT(*) as cnt FROM txs GROUP BY type;
+
+            CREATE MATERIALIZED VIEW mv_top_senders AS 
+            SELECT "from", COUNT(*) as cnt FROM txs GROUP BY "from" ORDER BY cnt DESC LIMIT 100;
+
+            CREATE MATERIALIZED VIEW mv_unique_senders AS 
+            SELECT COUNT(DISTINCT "from") as cnt FROM txs;
+
+            CREATE MATERIALIZED VIEW mv_top_events AS 
+            SELECT selector, COUNT(*) as cnt FROM logs 
+            WHERE selector IS NOT NULL 
+            GROUP BY selector ORDER BY cnt DESC LIMIT 100;
+            "#,
+        )
+        .await
+        .expect("Failed to create materialized views");
+
+        pool
+    });
+
+    let mut group = c.benchmark_group("olap_materialized");
+    group.significance_level(0.05);
+    group.sample_size(100); // More samples - these are fast!
+
+    // Materialized view queries (instant lookups)
+    group.bench_function("count_blocks_mv", |b| {
+        b.to_async(&rt).iter(|| async {
+            let conn = pool.get().await.unwrap();
+            let _: i64 = conn
+                .query_one("SELECT cnt FROM mv_block_count", &[])
+                .await
+                .unwrap()
+                .get(0);
+        });
+    });
+
+    group.bench_function("count_txs_mv", |b| {
+        b.to_async(&rt).iter(|| async {
+            let conn = pool.get().await.unwrap();
+            let _: i64 = conn
+                .query_one("SELECT cnt FROM mv_tx_count", &[])
+                .await
+                .unwrap()
+                .get(0);
+        });
+    });
+
+    group.bench_function("txs_by_type_mv", |b| {
         b.to_async(&rt).iter(|| async {
             let conn = pool.get().await.unwrap();
             let _rows = conn
-                .query(
-                    "SELECT selector, SUM(log_count) as cnt FROM logs_daily GROUP BY selector ORDER BY cnt DESC LIMIT 10",
-                    &[],
-                )
+                .query("SELECT * FROM mv_txs_by_type", &[])
+                .await
+                .unwrap();
+        });
+    });
+
+    group.bench_function("top_senders_mv", |b| {
+        b.to_async(&rt).iter(|| async {
+            let conn = pool.get().await.unwrap();
+            let _rows = conn
+                .query("SELECT * FROM mv_top_senders LIMIT 10", &[])
+                .await
+                .unwrap();
+        });
+    });
+
+    group.bench_function("unique_senders_mv", |b| {
+        b.to_async(&rt).iter(|| async {
+            let conn = pool.get().await.unwrap();
+            let _: i64 = conn
+                .query_one("SELECT cnt FROM mv_unique_senders", &[])
+                .await
+                .unwrap()
+                .get(0);
+        });
+    });
+
+    group.bench_function("top_events_mv", |b| {
+        b.to_async(&rt).iter(|| async {
+            let conn = pool.get().await.unwrap();
+            let _rows = conn
+                .query("SELECT * FROM mv_top_events LIMIT 10", &[])
                 .await
                 .unwrap();
         });
@@ -271,28 +340,6 @@ fn bench_comparison(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("oltp_vs_olap");
     group.significance_level(0.05);
-
-    // Direct comparison: count from full table vs aggregate
-    group.bench_function("tx_count/full_scan", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _: i64 = conn
-                .query_one("SELECT COUNT(*) FROM txs", &[])
-                .await
-                .unwrap()
-                .get(0);
-        });
-    });
-
-    group.bench_function("tx_count/aggregate", |b| {
-        b.to_async(&rt).iter(|| async {
-            let conn = pool.get().await.unwrap();
-            let _row = conn
-                .query_one("SELECT COALESCE(SUM(tx_count), 0) FROM txs_daily", &[])
-                .await
-                .unwrap();
-        });
-    });
 
     // Direct comparison: point lookup vs scan
     group.bench_function("single_block/by_pk", |b| {
@@ -321,5 +368,11 @@ fn bench_comparison(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_oltp_queries, bench_olap_queries, bench_comparison);
+criterion_group!(
+    benches,
+    bench_oltp_queries,
+    bench_olap_queries,
+    bench_olap_materialized,
+    bench_comparison
+);
 criterion_main!(benches);

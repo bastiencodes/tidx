@@ -72,12 +72,12 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
     let staging_table = format!("txs_staging_{}", std::process::id());
     
     conn.execute(
-        &format!("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE txs INCLUDING DEFAULTS)", staging_table),
+        &format!("CREATE TEMP TABLE IF NOT EXISTS {staging_table} (LIKE txs INCLUDING DEFAULTS)"),
         &[],
     )
     .await?;
 
-    conn.execute(&format!("TRUNCATE {}", staging_table), &[]).await?;
+    conn.execute(&format!("TRUNCATE {staging_table}"), &[]).await?;
 
     // Binary COPY into staging table
     let types = &[
@@ -107,10 +107,10 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            &format!(r#"COPY {} (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
+            &format!(r#"COPY {staging_table} (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
                 gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used,
                 nonce_key, nonce, fee_token, fee_payer, calls, call_count,
-                valid_before, valid_after, signature_type) FROM STDIN BINARY"#, staging_table),
+                valid_before, valid_after, signature_type) FROM STDIN BINARY"#),
         )
         .await?;
 
@@ -150,7 +150,7 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
     pinned_writer.as_mut().finish().await?;
 
     conn.execute(
-        &format!(r#"INSERT INTO txs SELECT * FROM {} ON CONFLICT (block_num, idx) DO NOTHING"#, staging_table),
+        &format!(r#"INSERT INTO txs SELECT * FROM {staging_table} ON CONFLICT (block_num, idx) DO NOTHING"#),
         &[],
     )
     .await?;
@@ -169,12 +169,12 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
     let staging_table = format!("logs_staging_{}", std::process::id());
     
     conn.execute(
-        &format!("CREATE TEMP TABLE IF NOT EXISTS {} (LIKE logs INCLUDING DEFAULTS)", staging_table),
+        &format!("CREATE TEMP TABLE IF NOT EXISTS {staging_table} (LIKE logs INCLUDING DEFAULTS)"),
         &[],
     )
     .await?;
 
-    conn.execute(&format!("TRUNCATE {}", staging_table), &[]).await?;
+    conn.execute(&format!("TRUNCATE {staging_table}"), &[]).await?;
 
     // Binary COPY into staging table
     let types = &[
@@ -191,7 +191,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            &format!("COPY {} (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY", staging_table),
+            &format!("COPY {staging_table} (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY"),
         )
         .await?;
 
@@ -218,7 +218,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
     pinned_writer.as_mut().finish().await?;
 
     conn.execute(
-        &format!("INSERT INTO logs SELECT * FROM {} ON CONFLICT (block_num, log_idx) DO NOTHING", staging_table),
+        &format!("INSERT INTO logs SELECT * FROM {staging_table} ON CONFLICT (block_num, log_idx) DO NOTHING"),
         &[],
     )
     .await?;

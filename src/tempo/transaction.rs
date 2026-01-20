@@ -117,7 +117,7 @@ impl TempoTransaction {
     }
 
     pub fn call_count(&self) -> i16 {
-        self.calls.as_ref().map(|c| c.len() as i16).unwrap_or(1)
+        self.calls.as_ref().map_or(1, |c| c.len() as i16)
     }
 
     pub fn signature_type(&self) -> Option<i16> {

@@ -165,7 +165,7 @@ fn format_eta(secs: f64) -> String {
 
     let secs = secs as u64;
     if secs < 60 {
-        format!("{}s", secs)
+        format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m {}s", secs / 60, secs % 60)
     } else if secs < 86400 {

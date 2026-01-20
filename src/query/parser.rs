@@ -11,7 +11,7 @@ pub struct EventSignature {
 fn is_valid_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
-        && s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -75,9 +75,7 @@ impl EventSignature {
         for (i, param) in self.params.iter().enumerate() {
             let col_name = param
                 .name
-                .as_deref()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| format!("arg{}", i));
+                .as_deref().map_or_else(|| format!("arg{i}"), |n| n.to_string());
 
             let decode_expr = if param.indexed {
                 let expr = param.ty.topic_decode_sql(topic_idx);
@@ -89,7 +87,7 @@ impl EventSignature {
                 expr
             };
 
-            selects.push(format!("{} AS \"{}\"", decode_expr, col_name));
+            selects.push(format!("{decode_expr} AS \"{col_name}\""));
         }
 
         let select_clause = if selects.is_empty() {
@@ -175,10 +173,10 @@ impl AbiParam {
                 if parts[1] == "indexed" {
                     (parts[0], true, Some(parts[2].to_string()))
                 } else {
-                    return Err(anyhow!("Invalid parameter format: {}", s));
+                    return Err(anyhow!("Invalid parameter format: {s}"));
                 }
             }
-            _ => return Err(anyhow!("Invalid parameter format: {}", s)),
+            _ => return Err(anyhow!("Invalid parameter format: {s}")),
         };
 
         if let Some(ref n) = name
@@ -247,7 +245,7 @@ impl AbiType {
             }
             let size: u8 = rest
                 .parse()
-                .map_err(|_| anyhow!("Invalid bytes size: {}", rest))?;
+                .map_err(|_| anyhow!("Invalid bytes size: {rest}"))?;
             return Ok(AbiType::Bytes(Some(size)));
         }
 
@@ -263,21 +261,21 @@ impl AbiType {
             let size_str = &inner_with_bracket[bracket_pos + 1..];
             let size: usize = size_str
                 .parse()
-                .map_err(|_| anyhow!("Invalid array size: {}", size_str))?;
+                .map_err(|_| anyhow!("Invalid array size: {size_str}"))?;
             return Ok(AbiType::FixedArray(Box::new(inner), size));
         }
 
-        Err(anyhow!("Unknown ABI type: {}", s))
+        Err(anyhow!("Unknown ABI type: {s}"))
     }
 
     pub fn canonical(&self) -> String {
         match self {
             AbiType::Address => "address".to_string(),
             AbiType::Bool => "bool".to_string(),
-            AbiType::Uint(bits) => format!("uint{}", bits),
-            AbiType::Int(bits) => format!("int{}", bits),
+            AbiType::Uint(bits) => format!("uint{bits}"),
+            AbiType::Int(bits) => format!("int{bits}"),
             AbiType::Bytes(None) => "bytes".to_string(),
-            AbiType::Bytes(Some(n)) => format!("bytes{}", n),
+            AbiType::Bytes(Some(n)) => format!("bytes{n}"),
             AbiType::String => "string".to_string(),
             AbiType::FixedArray(inner, size) => format!("{}[{}]", inner.canonical(), size),
             AbiType::DynamicArray(inner) => format!("{}[]", inner.canonical()),
@@ -290,30 +288,30 @@ impl AbiType {
 
     pub fn topic_decode_sql(&self, topic_idx: usize) -> String {
         match self {
-            AbiType::Address => format!("abi_address(topics[{}])", topic_idx),
-            AbiType::Uint(_) | AbiType::Int(_) => format!("abi_uint(topics[{}])", topic_idx),
-            AbiType::Bool => format!("abi_bool(topics[{}])", topic_idx),
-            AbiType::Bytes(Some(_)) | AbiType::Bytes(None) => format!("topics[{}]", topic_idx),
-            _ => format!("topics[{}]", topic_idx),
+            AbiType::Address => format!("abi_address(topics[{topic_idx}])"),
+            AbiType::Uint(_) | AbiType::Int(_) => format!("abi_uint(topics[{topic_idx}])"),
+            AbiType::Bool => format!("abi_bool(topics[{topic_idx}])"),
+            AbiType::Bytes(Some(_) | None) => format!("topics[{topic_idx}]"),
+            _ => format!("topics[{topic_idx}]"),
         }
     }
 
     pub fn data_decode_sql(&self, offset: usize) -> String {
         let start = offset + 1;
         match self {
-            AbiType::Address => format!("abi_address(substring(data FROM {} FOR 32))", start),
+            AbiType::Address => format!("abi_address(substring(data FROM {start} FOR 32))"),
             AbiType::Uint(_) => {
-                format!("abi_uint(substring(data FROM {} FOR 32))", start)
+                format!("abi_uint(substring(data FROM {start} FOR 32))")
             }
             AbiType::Int(_) => {
-                format!("abi_int(substring(data FROM {} FOR 32))", start)
+                format!("abi_int(substring(data FROM {start} FOR 32))")
             }
-            AbiType::Bool => format!("abi_bool(substring(data FROM {} FOR 32))", start),
-            AbiType::Bytes(Some(_)) | AbiType::Bytes(None) => {
-                format!("substring(data FROM {} FOR 32)", start)
+            AbiType::Bool => format!("abi_bool(substring(data FROM {start} FOR 32))"),
+            AbiType::Bytes(Some(_) | None) => {
+                format!("substring(data FROM {start} FOR 32)")
             }
-            AbiType::String => format!("abi_string(data, {})", offset),
-            _ => format!("substring(data FROM {} FOR 32)", start),
+            AbiType::String => format!("abi_string(data, {offset})"),
+            _ => format!("substring(data FROM {start} FOR 32)"),
         }
     }
 }

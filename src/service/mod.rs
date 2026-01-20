@@ -73,14 +73,14 @@ pub async fn execute_query(
     ];
     for word in &forbidden {
         if normalized.contains(word) {
-            return Err(anyhow!("Query contains forbidden keyword: {}", word));
+            return Err(anyhow!("Query contains forbidden keyword: {word}"));
         }
     }
 
     let sql = if let Some(sig_str) = signature {
         let sig = EventSignature::parse(sig_str)?;
         let cte = sig.to_cte_sql();
-        format!("WITH {} {}", cte, sql)
+        format!("WITH {cte} {sql}")
     } else {
         sql.to_string()
     };
@@ -112,7 +112,7 @@ pub async fn execute_query(
             metrics::record_query_duration(start.elapsed());
             rows
         }
-        Ok(Err(e)) => return Err(anyhow!("Query error: {}", e)),
+        Ok(Err(e)) => return Err(anyhow!("Query error: {e}")),
         Err(_) => return Err(anyhow!("Query timeout")),
     };
 
@@ -151,49 +151,40 @@ pub fn format_column_json(row: &tokio_postgres::Row, idx: usize) -> serde_json::
         "int2" => row
             .try_get::<_, i16>(idx)
             .ok()
-            .map(|v| serde_json::Value::Number(v.into()))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
         "int4" => row
             .try_get::<_, i32>(idx)
             .ok()
-            .map(|v| serde_json::Value::Number(v.into()))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
         "int8" => row
             .try_get::<_, i64>(idx)
             .ok()
-            .map(|v| serde_json::Value::Number(v.into()))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::Number(v.into())),
         "numeric" => row
             .try_get::<_, rust_decimal::Decimal>(idx)
             .ok()
-            .map(|v| serde_json::Value::String(v.to_string()))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::String(v.to_string())),
         "float4" | "float8" => row
             .try_get::<_, f64>(idx)
             .ok()
             .and_then(serde_json::Number::from_f64)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
         "bytea" => row
             .try_get::<_, Vec<u8>>(idx)
             .ok()
-            .map(|v| serde_json::Value::String(format!("0x{}", hex::encode(v))))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::String(format!("0x{}", hex::encode(v)))),
         "text" | "varchar" | "name" => row
             .try_get::<_, String>(idx)
             .ok()
-            .map(serde_json::Value::String)
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, serde_json::Value::String),
         "timestamptz" | "timestamp" => row
             .try_get::<_, DateTime<Utc>>(idx)
             .ok()
-            .map(|v| serde_json::Value::String(v.to_rfc3339()))
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, |v| serde_json::Value::String(v.to_rfc3339())),
         "bool" => row
             .try_get::<_, bool>(idx)
             .ok()
-            .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null),
+            .map_or(serde_json::Value::Null, serde_json::Value::Bool),
         _ => serde_json::Value::Null,
     }
 }

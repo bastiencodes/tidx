@@ -1,3 +1,6 @@
+mod auth;
+mod materialize;
+
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -8,7 +11,7 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive},
         IntoResponse, Response, Sse,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use futures::Stream;
@@ -20,6 +23,8 @@ use crate::broadcast::Broadcaster;
 use crate::db::Pool;
 use crate::service::{QueryOptions, QueryResult, SyncStatus};
 
+pub use auth::AdminApiKey;
+
 #[derive(Clone)]
 pub struct AppState {
     pub pool: Pool,
@@ -27,13 +32,34 @@ pub struct AppState {
 }
 
 pub fn router(pool: Pool, broadcaster: Arc<Broadcaster>) -> Router {
+    router_with_admin_key(pool, broadcaster, None)
+}
+
+pub fn router_with_admin_key(
+    pool: Pool,
+    broadcaster: Arc<Broadcaster>,
+    admin_api_key: Option<String>,
+) -> Router {
     let state = AppState { pool, broadcaster };
 
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
         .route("/query", post(handle_query).get(handle_query_live_get))
-        .route("/logs/{signature}", get(handle_logs))
+        .route("/logs/{signature}", get(handle_logs));
+
+    // Add protected /materialize routes if admin key is configured
+    if let Some(key) = admin_api_key {
+        router = router
+            .route(
+                "/materialize",
+                post(materialize::handle_create_view).get(materialize::handle_list_views),
+            )
+            .route("/materialize", delete(materialize::handle_delete_view))
+            .layer(axum::Extension(AdminApiKey(key)));
+    }
+
+    router
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -168,10 +194,8 @@ async fn handle_query_live(
         }
 
         // Get current head block to set baseline
-        if let Ok(status) = crate::service::get_status(&pool).await {
-            if let Some(s) = status {
-                last_block_num = s.synced_num as u64;
-            }
+        if let Ok(Some(s)) = crate::service::get_status(&pool).await {
+            last_block_num = s.synced_num as u64;
         }
 
         // Stream updates on each new block
@@ -301,7 +325,7 @@ fn extract_event_name(signature: &str) -> Result<String, ApiError> {
         return Err(ApiError::BadRequest("Event name too long".into()));
     }
     
-    let is_valid = name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false)
+    let is_valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     
     if !is_valid {
@@ -321,8 +345,7 @@ fn parse_time_filter(after: &str) -> Result<String, ApiError> {
             return Err(ApiError::BadRequest("Hours must be between 1 and 8760".into()));
         }
         Ok(format!(
-            "block_timestamp > NOW() - INTERVAL '{} hours'",
-            hours
+            "block_timestamp > NOW() - INTERVAL '{hours} hours'"
         ))
     } else if after.ends_with('d') {
         let days: i64 = after
@@ -333,8 +356,7 @@ fn parse_time_filter(after: &str) -> Result<String, ApiError> {
             return Err(ApiError::BadRequest("Days must be between 1 and 365".into()));
         }
         Ok(format!(
-            "block_timestamp > NOW() - INTERVAL '{} days'",
-            days
+            "block_timestamp > NOW() - INTERVAL '{days} days'"
         ))
     } else {
         let parsed = chrono::DateTime::parse_from_rfc3339(after)
@@ -388,7 +410,7 @@ pub fn inject_block_filter(sql: &str, block_num: u64) -> String {
         )
     } else {
         // Append WHERE at end
-        format!("{} WHERE {} = {}", sql, col, block_num)
+        format!("{sql} WHERE {col} = {block_num}")
     }
 }
 

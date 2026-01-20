@@ -65,8 +65,7 @@ async fn test_query_get_returns_sse() {
         .map(|v| v.to_str().unwrap_or(""));
     assert!(
         content_type.unwrap_or("").contains("text/event-stream"),
-        "expected SSE content-type, got {:?}",
-        content_type
+        "expected SSE content-type, got {content_type:?}"
     );
 }
 
@@ -96,8 +95,7 @@ async fn test_query_post_with_live_param_returns_sse() {
         .map(|v| v.to_str().unwrap_or(""));
     assert!(
         content_type.unwrap_or("").contains("text/event-stream"),
-        "expected SSE content-type, got {:?}",
-        content_type
+        "expected SSE content-type, got {content_type:?}"
     );
 }
 
@@ -157,7 +155,7 @@ fn test_inject_block_filter_blocks_table() {
     // Blocks table uses 'num' column
     let sql = "SELECT num, hash FROM blocks ORDER BY num DESC LIMIT 1";
     let filtered = inject_block_filter(sql, 100);
-    assert!(filtered.contains("num = 100"), "got: {}", filtered);
+    assert!(filtered.contains("num = 100"), "got: {filtered}");
     assert!(filtered.contains("ORDER BY"), "should preserve ORDER BY");
 }
 
@@ -166,7 +164,7 @@ fn test_inject_block_filter_txs_table() {
     // Txs table uses 'block_num' column
     let sql = "SELECT * FROM txs ORDER BY block_num DESC LIMIT 10";
     let filtered = inject_block_filter(sql, 200);
-    assert!(filtered.contains("block_num = 200"), "got: {}", filtered);
+    assert!(filtered.contains("block_num = 200"), "got: {filtered}");
 }
 
 #[test]
@@ -174,7 +172,7 @@ fn test_inject_block_filter_logs_table() {
     // Logs table uses 'block_num' column
     let sql = "SELECT * FROM logs WHERE address = '0x123' ORDER BY block_num DESC";
     let filtered = inject_block_filter(sql, 300);
-    assert!(filtered.contains("block_num = 300"), "got: {}", filtered);
+    assert!(filtered.contains("block_num = 300"), "got: {filtered}");
     assert!(filtered.contains("address = '0x123'"), "should preserve existing WHERE");
 }
 
@@ -182,7 +180,7 @@ fn test_inject_block_filter_logs_table() {
 fn test_inject_block_filter_with_existing_where() {
     let sql = "SELECT * FROM txs WHERE gas_used > 21000 ORDER BY block_num DESC";
     let filtered = inject_block_filter(sql, 400);
-    assert!(filtered.contains("block_num = 400"), "got: {}", filtered);
+    assert!(filtered.contains("block_num = 400"), "got: {filtered}");
     assert!(filtered.contains("gas_used > 21000"), "should preserve existing condition");
 }
 
@@ -190,5 +188,5 @@ fn test_inject_block_filter_with_existing_where() {
 fn test_inject_block_filter_no_order_by() {
     let sql = "SELECT COUNT(*) FROM blocks LIMIT 1";
     let filtered = inject_block_filter(sql, 500);
-    assert!(filtered.contains("num = 500"), "got: {}", filtered);
+    assert!(filtered.contains("num = 500"), "got: {filtered}");
 }

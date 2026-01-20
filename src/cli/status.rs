@@ -70,7 +70,7 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
             println!("│  Forward Sync");
             println!("│  ├─ Head:      {} {}", head, if live_head.is_some() { "(live)" } else { "" });
             println!("│  ├─ Synced:    {}", state.synced_num);
-            println!("│  └─ Lag:       {} blocks", lag);
+            println!("│  └─ Lag:       {lag} blocks");
             println!("│");
 
             // Backfill status
@@ -98,7 +98,7 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
                     println!("│  ├─ Status:   In progress");
                     println!("│  ├─ Position: block {}", format_number(n));
                     println!("│  ├─ Remaining: {} blocks", format_number(n));
-                    println!("│  └─ Progress: {}%", pct);
+                    println!("│  └─ Progress: {pct}%");
                 }
             }
 
@@ -111,7 +111,7 @@ async fn print_status(config: &Config, pool: &db::Pool) -> Result<()> {
         } else {
             println!("│  Status: Not syncing");
             if let Some(head) = live_head {
-                println!("│  Head: {} (live)", head);
+                println!("│  Head: {head} (live)");
             }
         }
 

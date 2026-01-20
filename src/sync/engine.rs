@@ -407,9 +407,7 @@ impl SyncEngine {
     ) -> Result<u64> {
         if from < to {
             return Err(anyhow::anyhow!(
-                "Backfill requires from ({}) >= to ({})",
-                from,
-                to
+                "Backfill requires from ({from}) >= to ({to})"
             ));
         }
 

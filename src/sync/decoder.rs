@@ -31,9 +31,7 @@ pub fn decode_transaction(tx: &TempoTransaction, block: &TempoBlock, idx: u32) -
     let block_timestamp = timestamp_from_secs(block.timestamp_u64());
 
     let nonce_key = tx
-        .nonce_key
-        .map(|k| k.to_be_bytes_vec())
-        .unwrap_or_else(|| vec![0u8; 32]);
+        .nonce_key.map_or_else(|| vec![0u8; 32], |k| k.to_be_bytes_vec());
 
     let calls_json = tx.calls.as_ref().and_then(|c| serde_json::to_value(c).ok());
 
@@ -42,20 +40,16 @@ pub fn decode_transaction(tx: &TempoTransaction, block: &TempoBlock, idx: u32) -
         block_timestamp,
         idx: idx as i32,
         hash: tx.hash.as_slice().to_vec(),
-        tx_type: tx.tx_type_u8() as i16,
+        tx_type: i16::from(tx.tx_type_u8()),
         from: tx.from.as_slice().to_vec(),
         to: tx.effective_to().map(|a| a.as_slice().to_vec()),
         value: tx.effective_value().to_string(),
         input: tx.effective_input().to_vec(),
         gas_limit: tx.gas.to::<u64>() as i64,
         max_fee_per_gas: tx
-            .max_fee_per_gas
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| tx.gas_price.map(|v| v.to_string()).unwrap_or("0".into())),
+            .max_fee_per_gas.map_or_else(|| tx.gas_price.map_or("0".into(), |v| v.to_string()), |v| v.to_string()),
         max_priority_fee_per_gas: tx
-            .max_priority_fee_per_gas
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "0".into()),
+            .max_priority_fee_per_gas.map_or_else(|| "0".into(), |v| v.to_string()),
         gas_used: None,
         nonce_key,
         nonce: tx.nonce.to::<u64>() as i64,

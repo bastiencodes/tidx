@@ -292,6 +292,6 @@ async fn test_pipelined_sync() {
 
     // Verify we synced some blocks
     let block_count = db.block_count().await;
-    println!("Pipelined sync: {} blocks synced", block_count);
+    println!("Pipelined sync: {block_count} blocks synced");
     assert!(block_count > 0, "Expected some blocks to be synced");
 }

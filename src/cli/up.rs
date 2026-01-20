@@ -11,6 +11,7 @@ use ak47::api;
 use ak47::broadcast::Broadcaster;
 use ak47::config::Config;
 use ak47::db;
+use ak47::materialize::MaterializeService;
 use ak47::sync::engine::SyncEngine;
 
 #[derive(ClapArgs)]
@@ -58,9 +59,17 @@ pub async fn run(args: Args) -> Result<()> {
 
     if config.http.enabled {
         let addr: SocketAddr = format!("{}:{}", config.http.bind, config.http.port).parse()?;
-        let router = api::router(pool.clone(), broadcaster.clone());
+        let router = api::router_with_admin_key(
+            pool.clone(),
+            broadcaster.clone(),
+            config.http.admin_api_key.clone(),
+        );
 
-        info!(addr = %addr, "Starting HTTP API server");
+        if config.http.admin_api_key.is_some() {
+            info!(addr = %addr, "Starting HTTP API server (admin endpoints enabled)");
+        } else {
+            info!(addr = %addr, "Starting HTTP API server");
+        }
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let mut shutdown_rx_api = shutdown_tx.subscribe();
@@ -72,6 +81,15 @@ pub async fn run(args: Args) -> Result<()> {
                 })
                 .await
                 .ok();
+        });
+    }
+
+    // Start materialized view refresh service
+    {
+        let materialize_service = MaterializeService::new(pool.clone(), broadcaster.clone());
+        let shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            materialize_service.run(shutdown_rx).await;
         });
     }
 

@@ -79,7 +79,7 @@ impl RpcClient {
             )
             .await?;
         resp.result
-            .ok_or_else(|| anyhow!("Block {} not found", num))
+            .ok_or_else(|| anyhow!("Block {num} not found"))
     }
 
     pub async fn get_blocks_batch(&self, range: RangeInclusive<u64>) -> Result<Vec<TempoBlock>> {

@@ -170,10 +170,10 @@ fn bench_mixed_workload(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let blocks = generate_blocks(10, base_block as usize);
             let txs: Vec<_> = (0..10)
-                .flat_map(|i| generate_txs(500, base_block + i as i64))
+                .flat_map(|i| generate_txs(500, base_block + i64::from(i)))
                 .collect();
             let logs: Vec<_> = (0..10)
-                .flat_map(|i| generate_logs(1000, base_block + i as i64))
+                .flat_map(|i| generate_logs(1000, base_block + i64::from(i)))
                 .collect();
             base_block += 10;
 
@@ -193,10 +193,10 @@ fn bench_mixed_workload(c: &mut Criterion) {
         b.to_async(&rt).iter(|| {
             let blocks = generate_blocks(10, base_block as usize);
             let txs: Vec<_> = (0..10)
-                .flat_map(|i| generate_txs(1000, base_block + i as i64))
+                .flat_map(|i| generate_txs(1000, base_block + i64::from(i)))
                 .collect();
             let logs: Vec<_> = (0..10)
-                .flat_map(|i| generate_logs(3000, base_block + i as i64))
+                .flat_map(|i| generate_logs(3000, base_block + i64::from(i)))
                 .collect();
             base_block += 10;
 

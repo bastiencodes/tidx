@@ -103,11 +103,10 @@ async fn test_cte_query_syntax() {
 
     // Build a full query and verify it's valid SQL (should return 0 rows on empty DB)
     let sql = format!(
-        r#"WITH {}
+        r#"WITH {cte}
 SELECT * FROM "Transfer"
 WHERE block_timestamp > NOW() - INTERVAL '1 hour'
-LIMIT 10"#,
-        cte
+LIMIT 10"#
     );
 
     let rows = conn
