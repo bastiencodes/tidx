@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::db::{DuckDbPool, Pool};
+use crate::db::{execute_duckdb_query, DuckDbPool, Pool};
 use crate::metrics;
 use crate::query::{extract_column_references, route_query, validate_query, EventSignature, QueryEngine};
 
@@ -255,23 +255,36 @@ async fn execute_query_postgres(
 }
 
 /// Execute a query on DuckDB.
+///
+/// Runs in a blocking thread pool to avoid blocking the async runtime.
+/// Uses DuckDB's query timeout setting for actual cancellation.
 async fn execute_query_duckdb(
     pool: &Arc<DuckDbPool>,
     sql: &str,
     options: &QueryOptions,
 ) -> Result<QueryResult> {
     let start = Instant::now();
+    let pool = Arc::clone(pool);
+    let sql = sql.to_string();
+    let timeout_secs = (options.timeout_ms as f64 / 1000.0).max(1.0);
 
-    // DuckDB queries are synchronous but fast for analytical workloads.
-    // The pool.query() method handles locking internally.
+    // Run DuckDB query in blocking thread pool with timeout
     let result = tokio::time::timeout(
-        std::time::Duration::from_millis(options.timeout_ms + 100),
-        pool.query(sql),
+        std::time::Duration::from_millis(options.timeout_ms + 500),
+        tokio::task::spawn_blocking(move || {
+            let conn = futures::executor::block_on(pool.conn());
+            // Set query timeout at DuckDB level for actual cancellation
+            let _ = conn.execute(
+                &format!("SET query_timeout = '{}s'", timeout_secs as u64),
+                [],
+            );
+            execute_duckdb_query(&conn, &sql)
+        }),
     )
     .await;
 
     match result {
-        Ok(Ok((columns, rows))) => {
+        Ok(Ok(Ok((columns, rows)))) => {
             metrics::record_query_duration(start.elapsed());
             let row_count = rows.len();
             metrics::record_query_rows(row_count as u64);
@@ -283,7 +296,8 @@ async fn execute_query_duckdb(
                 engine: Some("duckdb".to_string()),
             })
         }
-        Ok(Err(e)) => Err(anyhow!("DuckDB query error: {e:#}")),
+        Ok(Ok(Err(e))) => Err(anyhow!("DuckDB query error: {e:#}")),
+        Ok(Err(e)) => Err(anyhow!("DuckDB task error: {e}")),
         Err(_) => Err(anyhow!("Query timeout")),
     }
 }
