@@ -18,7 +18,6 @@
 
 ## Features
 
-- **Bidirectional Sync** — Follow chain head in realtime while backfilling history concurrently
 - **Hybrid Query Routing** — Automatic routing to DuckDB for analytics, PostgreSQL for point lookups
 - **Dual Storage** — TimescaleDB for OLTP + DuckDB columnar for OLAP
 - **Continuous Aggregates** — Materialized views that auto-refresh for instant analytics
@@ -546,6 +545,37 @@ All tables use composite primary keys with timestamps for efficient range querie
 | `head_num` | INT8 | Remote chain head |
 | `synced_num` | INT8 | Highest synced block |
 | `backfill_num` | INT8 | Lowest synced block |
+
+## Benchmarks
+
+DuckDB performance on **20 million rows** (in-memory):
+
+| Benchmark | Time | SQL Op | Rows |
+|-----------|------|--------|------|
+| count_blocks | 407µs | COUNT(*) | 20M |
+| count_logs | 454µs | COUNT(*) | 20M |
+| sum_gas_used | 1.95ms | SUM() | 20M |
+| group_by_miner | 55ms | GROUP BY | 20M |
+| group_by_from | 7.5ms | GROUP BY | 2M |
+| count_distinct_senders | 7.1ms | COUNT(DISTINCT) | 2M |
+| count_distinct_addresses | 47ms | COUNT(DISTINCT) | 20M |
+| running_sum_gas | 214ms | SUM() OVER | 20M |
+| transfer_decode_all | 91ms | UDF decode | 100K |
+| transfer_group_by_to | 518ms | UDF + GROUP BY | 20M |
+| transfer_sum_values | 228ms | UDF + SUM() | 20M |
+| point_lookup_block | 287µs | WHERE = | 1 |
+| range_scan_1000_blocks | 1.5ms | WHERE BETWEEN | 1K |
+| hourly_gas_stats | 626ms | date_trunc + GROUP BY | 20M |
+
+Run benchmarks:
+
+```bash
+# PostgreSQL vs DuckDB comparison
+DATABASE_URL=postgres://... cargo bench --bench engine_bench
+
+# 20M row scale test
+cargo bench --bench scale_bench
+```
 
 ## Development
 
