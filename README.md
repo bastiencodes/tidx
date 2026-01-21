@@ -464,54 +464,12 @@ Legend:
   ░░░░  = gaps (missing blocks)
 ```
 
-### Sync Operations
-
 | Operation | Description |
 |-----------|-------------|
-| **REALTIME** | Follows chain head immediately, maintains ~0 lag |
-| **GAP SYNC** | Detects ALL gaps, fills from most recent to earliest |
+| **Realtime** | Follows chain head immediately, maintains ~0 lag |
+| **Gap Sync** | Detects all gaps, fills from most recent to earliest |
 
-### How Gap Sync Works
-
-1. **Detect all gaps** — SQL query finds every discontinuity in the `blocks` table, plus the gap from genesis to the first synced block
-2. **Sort by recency** — Gaps sorted by end block descending (most recent first)
-3. **Fill one gap at a time** — Each gap is filled backwards (end → start)
-4. **Repeat** — When a gap is closed, moves to the next most recent gap
-
-```sql
--- Detect gaps between existing blocks
-SELECT prev_num + 1 as gap_start, num - 1 as gap_end
-FROM (SELECT num, LAG(num) OVER (ORDER BY num) as prev_num FROM blocks)
-WHERE num - prev_num > 1
-
--- Plus: gap from 0 to MIN(num) if MIN(num) > 0
-```
-
-### Why Most Recent First?
-
-| Benefit | Explanation |
-|---------|-------------|
-| **Recent data available faster** | Users typically query recent blocks, not ancient history |
-| **Realtime gaps filled quickly** | If realtime jumps ahead, those gaps are filled immediately |
-| **Graceful degradation** | Even during initial sync, recent data is always available |
-
-### Example: Multiple Gaps
-
-```
-Scenario: Initial sync with indexer restarts
-
-Block Numbers:  0          100    240  250          390  400
-                │           │      │    │            │    │
-                ▼           ▼      ▼    ▼            ▼    ▼
-    INDEXED:    ████████████       █████             ██████
-                
-Gaps detected (sorted by end DESC):
-  1. (251, 389)  ← filled first (most recent)
-  2. (101, 239)  ← filled second
-  3. (0, 99)     ← filled last (if no blocks at genesis yet)
-```
-
-This architecture ensures **new blocks are always indexed immediately** while historical data is backfilled in the background, prioritizing recent gaps.
+Gap sync finds discontinuities via SQL and adds the gap from genesis to the first synced block. Gaps are sorted by end block descending (most recent first) and filled one at a time. Recent gaps are prioritized so users can query recent data during initial sync.
 
 ## Development
 
