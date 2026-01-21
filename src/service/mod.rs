@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use crate::db::{DuckDbPool, Pool};
 use crate::metrics;
-use crate::query::{extract_column_references, route_query, EventSignature, QueryEngine};
+use crate::query::{extract_column_references, route_query, validate_query, EventSignature, QueryEngine};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncStatus {
@@ -125,22 +125,8 @@ pub async fn execute_query_with_engine(
     options: &QueryOptions,
     force_engine: Option<&str>,
 ) -> Result<QueryResult> {
-    // Strip leading SQL comments before validation
-    let sql_for_validation = strip_leading_comments(sql);
-    let normalized = sql_for_validation.trim().to_uppercase();
-
-    if !normalized.starts_with("SELECT") && !normalized.starts_with("WITH") {
-        return Err(anyhow!("Only SELECT queries are allowed"));
-    }
-
-    let forbidden = [
-        "INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "CREATE", "GRANT", "REVOKE",
-    ];
-    for word in &forbidden {
-        if normalized.contains(word) {
-            return Err(anyhow!("Query contains forbidden keyword: {word}"));
-        }
-    }
+    // Validate query using proper SQL parsing (prevents V1 comment bypass, V2/V13 dangerous functions)
+    validate_query(sql)?;
 
     // Determine which engine to use (forced or auto-detected)
     let engine = match force_engine {
@@ -176,7 +162,9 @@ pub async fn execute_query_with_engine(
         sql.to_string()
     };
 
-    let sql = if !normalized.contains("LIMIT") {
+    // Add LIMIT if not present
+    let sql_upper = sql.to_uppercase();
+    let sql = if !sql_upper.contains("LIMIT") {
         format!("{} LIMIT {}", sql, options.limit)
     } else {
         sql
@@ -355,25 +343,3 @@ pub fn format_column_string(row: &tokio_postgres::Row, idx: usize) -> String {
     }
 }
 
-/// Strips leading SQL comments (both block `/* */` and line `--`) from a query.
-fn strip_leading_comments(sql: &str) -> &str {
-    let mut s = sql.trim_start();
-    loop {
-        if s.starts_with("/*") {
-            if let Some(end) = s.find("*/") {
-                s = s[end + 2..].trim_start();
-            } else {
-                break;
-            }
-        } else if s.starts_with("--") {
-            if let Some(end) = s.find('\n') {
-                s = s[end + 1..].trim_start();
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    s
-}
