@@ -425,7 +425,7 @@ pub async fn get_block_hash(pool: &Pool, block_num: u64) -> Result<Option<Vec<u8
     Ok(row.map(|r| r.get(0)))
 }
 
-/// Detect gaps in the block sequence
+/// Detect gaps in the block sequence (between existing blocks only)
 /// Returns a list of (start, end) ranges that are missing
 pub async fn detect_gaps(pool: &Pool) -> Result<Vec<(u64, u64)>> {
     let conn = pool.get().await?;
@@ -454,4 +454,36 @@ pub async fn detect_gaps(pool: &Pool) -> Result<Vec<(u64, u64)>> {
             )
         })
         .collect())
+}
+
+/// Detect ALL gaps including from genesis to first block
+/// Returns gaps sorted by end block descending (most recent first)
+pub async fn detect_all_gaps(pool: &Pool, tip_num: u64) -> Result<Vec<(u64, u64)>> {
+    let conn = pool.get().await?;
+
+    // Get the lowest block number we have
+    let min_block: Option<i64> = conn
+        .query_one("SELECT MIN(num) FROM blocks", &[])
+        .await?
+        .get(0);
+
+    let mut gaps = detect_gaps(pool).await?;
+
+    // Add gap from genesis to first block (if we have any blocks and min > 0)
+    if let Some(min) = min_block {
+        if min > 0 {
+            gaps.push((0, min as u64 - 1));
+        }
+    } else if tip_num > 0 {
+        // No blocks at all - entire range is a gap
+        gaps.push((0, tip_num));
+    }
+
+    // Filter to only gaps up to tip_num
+    gaps.retain(|(_, end)| *end <= tip_num);
+
+    // Sort by end block descending (most recent gaps first)
+    gaps.sort_by(|a, b| b.1.cmp(&a.1));
+
+    Ok(gaps)
 }

@@ -15,7 +15,7 @@ use super::decoder::{decode_block, decode_log, decode_receipt, decode_transactio
 use super::fetcher::RpcClient;
 use super::replicator::ReplicatorHandle;
 use super::writer::{
-    detect_gaps, get_block_hash, load_sync_state, save_sync_state, update_synced_num,
+    detect_all_gaps, get_block_hash, load_sync_state, save_sync_state, update_synced_num,
     update_tip_num, write_block, write_blocks, write_logs, write_receipts, write_txs,
 };
 
@@ -265,7 +265,8 @@ impl SyncEngine {
 
     /// Detect and fill any gaps in the indexed block sequence
     pub async fn fill_gaps(&self) -> Result<usize> {
-        let gaps = detect_gaps(&self.pool).await?;
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
+        let gaps = detect_all_gaps(&self.pool, state.tip_num).await?;
         let mut filled = 0;
 
         for (start, end) in gaps {
@@ -578,109 +579,98 @@ async fn run_gapfill_loop(
     Ok(())
 }
 
-/// Single tick of gap-fill: detect gaps and fill them
-/// Handles both:
-/// 1. Holes in the blocks table (from detect_gaps)
-/// 2. Gap between synced_num and tip_num (from realtime jumping ahead)
-async fn tick_gapfill(
+/// Single tick of gap sync: detect ALL gaps and fill from most recent to earliest
+/// Unified approach - no separate "backfill" concept, just gaps to fill
+async fn tick_gap_sync(
     pool: &Pool,
     rpc: &RpcClient,
     chain_id: u64,
+    batch_size: u64,
     progress: &mut SyncProgress,
 ) -> Result<()> {
     let state = load_sync_state(pool, chain_id).await?.unwrap_or_default();
-    let all_gaps = detect_gaps(pool).await?;
-
-    // Only fill gaps within the synced region [backfill_num, tip_num]
-    // But use a slightly lower floor to catch gaps at the backfill boundary
-    // (backfill moves backwards, so gaps can be just below current position)
-    let backfill_floor = state.backfill_num.unwrap_or(state.tip_num);
-    let floor_with_margin = backfill_floor.saturating_sub(1000); // 1000 block margin
     
-    let mut gaps: Vec<_> = all_gaps
-        .into_iter()
-        .filter(|(start, end)| *start >= floor_with_margin && *end <= state.tip_num)
-        .collect();
-
-    // Sort by size ascending - fill small gaps first (quick wins)
-    gaps.sort_by_key(|(s, e)| e - s);
-
-    // Also check for gap between synced_num and tip_num
-    // This happens when realtime jumped ahead to follow head
-    let contiguous_floor = backfill_floor.max(state.synced_num);
-    if state.tip_num > contiguous_floor + 1 {
-        let lag_gap_start = contiguous_floor + 1;
-        let lag_gap_end = state.tip_num.saturating_sub(1);
-        if lag_gap_end >= lag_gap_start && lag_gap_start >= floor_with_margin {
-            let lag_gap = (lag_gap_start, lag_gap_end);
-            if !gaps.iter().any(|(s, e)| *s <= lag_gap_start && *e >= lag_gap_end) {
-                gaps.push(lag_gap);
-            }
-        }
-    }
+    // Detect ALL gaps including from genesis, sorted by end DESC (most recent first)
+    let gaps = detect_all_gaps(pool, state.tip_num).await?;
 
     if gaps.is_empty() {
-        // No gaps - update synced_num to match tip_num
+        // No gaps - fully synced from genesis to tip
         if state.synced_num < state.tip_num {
             update_synced_num(pool, chain_id, state.tip_num).await?;
-            info!(synced_num = state.tip_num, "Gap-fill: fully caught up");
+            info!(synced_num = state.tip_num, "Gap sync: fully synced");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
         return Ok(());
     }
 
     let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
-    info!(
-        gap_count = gaps.len(),
+    let gap_count = gaps.len();
+    
+    // Take the first (most recent) gap to fill
+    let (gap_start, gap_end) = gaps[0];
+    let gap_size = gap_end - gap_start + 1;
+    
+    debug!(
+        gap_count = gap_count,
         total_blocks = total_gap_blocks,
-        "Gap-fill: detected gaps to fill"
+        current_gap = format!("{} -> {} ({} blocks)", gap_start, gap_end, gap_size),
+        "Gap sync: filling most recent gap"
     );
 
-    for (gap_start, gap_end) in gaps {
-        let gap_size = gap_end - gap_start + 1;
+    // Fill this gap in batches (from end backwards to start for most recent first)
+    let mut current_end = gap_end;
+
+    while current_end >= gap_start {
+        let current_start = current_end.saturating_sub(batch_size - 1).max(gap_start);
+        
+        sync_range_standalone(pool, rpc, current_start, current_end).await?;
+
+        let batch_count = current_end - current_start + 1;
+        metrics::record_blocks_indexed(chain_id, batch_count);
+        progress.report_backfill(current_start, 0, batch_count);
+
         debug!(
-            gap_start = gap_start,
-            gap_end = gap_end,
-            size = gap_size,
-            "Gap-fill: filling gap"
+            from = current_start,
+            to = current_end,
+            "Gap sync: wrote batch"
         );
 
-        // Fill gap in batches
-        const BATCH_SIZE: u64 = 50;
-        let mut current = gap_start;
-
-        while current <= gap_end {
-            let batch_end = (current + BATCH_SIZE - 1).min(gap_end);
-            sync_range_standalone(pool, rpc, current, batch_end).await?;
-
-            let batch_count = batch_end - current + 1;
-            metrics::record_blocks_indexed(chain_id, batch_count);
-            progress.report_backfill(current, gap_start, batch_count);
-
-            debug!(
-                from = current,
-                to = batch_end,
-                "Gap-fill: wrote batch"
-            );
-
-            current = batch_end + 1;
+        if current_start == gap_start {
+            break;
         }
-
-        info!(
-            gap_start = gap_start,
-            gap_end = gap_end,
-            "Gap-fill: closed gap"
-        );
+        current_end = current_start.saturating_sub(1);
     }
 
-    // After filling all gaps, update synced_num to the highest contiguous block
-    let state = load_sync_state(pool, chain_id).await?.unwrap_or_default();
-    let new_gaps = detect_gaps(pool).await?;
-    if new_gaps.is_empty() && state.tip_num > 0 {
-        update_synced_num(pool, chain_id, state.tip_num).await?;
-    }
+    info!(
+        gap_start = gap_start,
+        gap_end = gap_end,
+        remaining_gaps = gap_count - 1,
+        "Gap sync: closed gap"
+    );
+
+    // Update backfill_num to track progress (lowest block we've reached)
+    let mut updated_state = state.clone();
+    updated_state.backfill_num = Some(gap_start);
+    save_sync_state(pool, &updated_state).await?;
 
     Ok(())
+}
+
+/// Legacy tick_gapfill - now calls unified tick_gap_sync
+async fn tick_gapfill(
+    pool: &Pool,
+    rpc: &RpcClient,
+    chain_id: u64,
+    progress: &mut SyncProgress,
+) -> Result<()> {
+    tick_gap_sync(pool, rpc, chain_id, 100, progress).await
+}
+
+/// Check if fully synced (no gaps from genesis to tip)
+#[allow(dead_code)]
+async fn is_fully_synced(pool: &Pool, tip_num: u64) -> Result<bool> {
+    let gaps = detect_all_gaps(pool, tip_num).await?;
+    Ok(gaps.is_empty())
 }
 
 /// Standalone sync_range for gap-fill (doesn't need SyncEngine self)

@@ -228,81 +228,27 @@ fn spawn_sync_engine(
         chain = %chain.name,
         chain_id = chain.chain_id,
         rpc = %chain.rpc_url,
-        backfill = chain.backfill,
         duckdb = chain.duckdb_path.is_some(),
         "Starting sync for chain"
     );
 
     tokio::spawn(async move {
-        let engine = match SyncEngine::new(pool.clone(), &chain.rpc_url).await {
-            Ok(e) => e,
+        // Create sync engine with broadcaster
+        let mut engine = match SyncEngine::new(pool, &chain.rpc_url).await {
+            Ok(e) => e.with_broadcaster(broadcaster),
             Err(e) => {
                 error!(error = %e, chain = %chain.name, "Failed to create sync engine");
                 return;
             }
         };
 
-        let engine = if let Some(ref handle) = replicator_handle {
-            engine.with_replicator(handle.clone())
-        } else {
-            engine
-        };
-
-        if chain.backfill {
-            if let Ok(state) = engine.status().await {
-                if !state.backfill_complete() {
-                    info!(chain = %chain.name, "Starting background backfill");
-                    if let Ok(backfill_engine) = SyncEngine::new(pool.clone(), &chain.rpc_url).await {
-                        let batch_size = chain.batch_size;
-                        let chain_name = chain.name.clone();
-                        tokio::spawn(async move {
-                            let head = match backfill_engine.get_head().await {
-                                Ok(h) => h,
-                                Err(e) => {
-                                    error!(error = %e, "Failed to get chain head for backfill");
-                                    return;
-                                }
-                            };
-
-                            let state = backfill_engine.status().await.unwrap_or_default();
-                            let start = state.backfill_num.unwrap_or(head.saturating_sub(1));
-
-                            if start == 0 {
-                                info!("Backfill already complete");
-                                return;
-                            }
-
-                            info!(start = start, target = 0, "Backfill starting from head");
-
-                            let (_, rx) = tokio::sync::broadcast::channel(1);
-                            match backfill_engine.backfill(start, 0, batch_size, rx).await {
-                                Ok(synced) if synced > 0 => {
-                                    info!(blocks = synced, chain = %chain_name, "Backfill complete");
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    error!(error = %e, "Backfill failed");
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        }
-
-        let mut forward_engine = match SyncEngine::new(pool, &chain.rpc_url).await {
-            Ok(e) => e.with_broadcaster(broadcaster),
-            Err(e) => {
-                error!(error = %e, chain = %chain.name, "Failed to create forward sync engine");
-                return;
-            }
-        };
-
         if let Some(handle) = replicator_handle {
-            forward_engine = forward_engine.with_replicator(handle);
+            engine = engine.with_replicator(handle);
         }
 
-        if let Err(e) = forward_engine.run(shutdown_rx).await {
+        // Run the sync engine - handles both realtime sync and gap sync
+        // Gap sync fills ALL gaps from most recent to earliest (replaces backfill)
+        if let Err(e) = engine.run(shutdown_rx).await {
             error!(error = %e, chain = %chain.name, "Sync engine failed");
         }
     });

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use ak47::config::Config;
 use ak47::db;
 use ak47::sync::fetcher::RpcClient;
-use ak47::sync::writer::{detect_gaps, load_sync_state};
+use ak47::sync::writer::{detect_all_gaps, load_sync_state};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -82,60 +82,42 @@ async fn print_status(config: &Config) -> Result<()> {
             println!("│  └─ Lag:       {realtime_lag} blocks");
             println!("│");
 
-            // Gap-fill status - only show gaps within synced region
-            let all_gaps = detect_gaps(&pool).await.unwrap_or_default();
-            let backfill_floor = state.backfill_num.unwrap_or(state.tip_num);
-            let gaps: Vec<_> = all_gaps
-                .into_iter()
-                .filter(|(start, end)| *start >= backfill_floor && *end <= state.tip_num)
-                .collect();
-
-            if !gaps.is_empty() {
-                let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
-                println!("│  Gaps");
-                println!("│  ├─ Count:     {} ({} blocks total)", gaps.len(), format_number(total_gap_blocks));
-                for (i, (start, end)) in gaps.iter().enumerate() {
-                    let size = end - start + 1;
-                    let prefix = if i == gaps.len() - 1 { "└" } else { "├" };
-                    println!("│  │  {prefix}─ {} → {} ({} blocks)", format_number(*start), format_number(*end), format_number(size));
+            // Gap sync status - show ALL gaps (sorted by end desc, most recent first)
+            let gaps = detect_all_gaps(&pool, state.tip_num).await.unwrap_or_default();
+            let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+            
+            println!("│  Gap Sync");
+            if gaps.is_empty() {
+                println!("│  └─ Status:   ✓ Fully synced (0 → {})", format_number(state.tip_num));
+            } else {
+                let pct = if state.tip_num > 0 {
+                    let synced = state.tip_num.saturating_sub(total_gap_blocks);
+                    (synced as f64 / state.tip_num as f64 * 100.0) as u64
+                } else {
+                    0
+                };
+                println!("│  ├─ Status:   In progress");
+                println!("│  ├─ Gaps:     {} ({} blocks)", gaps.len(), format_number(total_gap_blocks));
+                println!("│  ├─ Progress: {pct}%");
+                if let Some(rate) = state.sync_rate() {
+                    let eta_secs = if rate > 0.0 { total_gap_blocks as f64 / rate } else { 0.0 };
+                    println!("│  ├─ Rate:     {:.0} blk/s", rate);
+                    println!("│  └─ ETA:      {}", format_eta(eta_secs));
+                } else {
+                    println!("│  └─ ETA:      calculating...");
                 }
                 println!("│");
-            }
-
-            // Backfill status
-            let remaining = state.backfill_remaining();
-            println!("│  Backfill");
-            match state.backfill_num {
-                None if remaining > 0 => {
-                    println!("│  ├─ Status:   Pending");
-                    println!("│  └─ Needed:   {} blocks (0 → {})", format_number(remaining), format_number(state.tip_num));
+                
+                // Show top 5 gaps (already sorted by end desc - most recent first)
+                let display_gaps: Vec<_> = gaps.iter().take(5).collect();
+                println!("│  Next Gaps (most recent first)");
+                for (i, (start, end)) in display_gaps.iter().enumerate() {
+                    let size = end - start + 1;
+                    let prefix = if i == display_gaps.len() - 1 && gaps.len() <= 5 { "└" } else { "├" };
+                    println!("│  │  {prefix}─ {} → {} ({} blocks)", format_number(*start), format_number(*end), format_number(size));
                 }
-                None => {
-                    println!("│  └─ Status:   Not needed");
-                }
-                Some(0) => {
-                    println!("│  └─ Status:   ✓ Complete (genesis reached)");
-                }
-                Some(n) => {
-                    let total = state.tip_num;
-                    let done = state.tip_num.saturating_sub(n);
-                    let pct = if total > 0 {
-                        (done as f64 / total as f64 * 100.0) as u64
-                    } else {
-                        0
-                    };
-                    println!("│  ├─ Status:   In progress");
-                    println!("│  ├─ Position: block {}", format_number(n));
-                    println!("│  ├─ Remaining: {} blocks", format_number(n));
-                    println!("│  ├─ Progress: {pct}%");
-                    if let Some(rate) = state.sync_rate() {
-                        println!("│  ├─ Rate:     {:.0} blk/s", rate);
-                    }
-                    if let Some(eta) = state.backfill_eta_secs() {
-                        println!("│  └─ ETA:      {}", format_eta(eta));
-                    } else {
-                        println!("│  └─ ETA:      calculating...");
-                    }
+                if gaps.len() > 5 {
+                    println!("│  │  └─ ... and {} more gaps", gaps.len() - 5);
                 }
             }
 
@@ -174,13 +156,8 @@ async fn print_json_status(config: &Config) -> Result<()> {
 
         let (state, gaps) = if let Ok(pool) = db::create_pool(&chain.pg_url).await {
             let state = load_sync_state(&pool, chain.chain_id).await.ok().flatten();
-            let all_gaps = detect_gaps(&pool).await.unwrap_or_default();
-            let backfill_floor = state.as_ref().map(|s| s.backfill_num.unwrap_or(s.tip_num)).unwrap_or(0);
             let tip = state.as_ref().map(|s| s.tip_num).unwrap_or(0);
-            let gaps: Vec<_> = all_gaps
-                .into_iter()
-                .filter(|(start, end)| *start >= backfill_floor && *end <= tip)
-                .collect();
+            let gaps = detect_all_gaps(&pool, tip).await.unwrap_or_default();
             (state, gaps)
         } else {
             (None, vec![])
