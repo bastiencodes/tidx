@@ -584,9 +584,9 @@ All tables use composite primary keys with timestamps for efficient range querie
 
 ### Prerequisites
 
-- Rust 1.75+
-- Docker & Docker Compose
-- PostgreSQL client (optional)
+- [Rust 1.75+](https://rustup.rs/)
+- [Docker](https://docs.docker.com/get-docker/) & [Docker Compose](https://docs.docker.com/compose/install/)
+- [PostgreSQL client](https://www.postgresql.org/download/) (optional)
 
 ### Make Commands
 
