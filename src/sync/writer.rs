@@ -469,14 +469,15 @@ pub async fn detect_all_gaps(pool: &Pool, tip_num: u64) -> Result<Vec<(u64, u64)
 
     let mut gaps = detect_gaps(pool).await?;
 
-    // Add gap from genesis to first block (if we have any blocks and min > 0)
+    // Add gap from block 1 to first block (if we have any blocks and min > 1)
+    // Block 0 is typically empty/genesis, so we start from block 1
     if let Some(min) = min_block {
-        if min > 0 {
-            gaps.push((0, min as u64 - 1));
+        if min > 1 {
+            gaps.push((1, min as u64 - 1));
         }
     } else if tip_num > 0 {
-        // No blocks at all - entire range is a gap
-        gaps.push((0, tip_num));
+        // No blocks at all - entire range is a gap (starting from 1)
+        gaps.push((1, tip_num));
     }
 
     // Filter to only gaps up to tip_num
