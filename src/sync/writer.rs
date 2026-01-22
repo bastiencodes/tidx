@@ -61,25 +61,24 @@ pub async fn write_blocks(pool: &Pool, blocks: &[BlockRow]) -> Result<()> {
     Ok(())
 }
 
-/// Batch insert transactions using COPY for maximum throughput
+/// Batch insert transactions using DELETE + COPY for maximum throughput
 pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
     if txs.is_empty() {
         return Ok(());
     }
 
     let conn = pool.get().await?;
+    conn.execute("SET statement_timeout = 0", &[]).await?;
 
-    let staging_table = format!("txs_staging_{}", std::process::id());
-    
+    // Get block range and delete existing rows before COPY
+    let min_block = txs.iter().map(|t| t.block_num).min().unwrap();
+    let max_block = txs.iter().map(|t| t.block_num).max().unwrap();
     conn.execute(
-        &format!("CREATE TEMP TABLE IF NOT EXISTS {staging_table} (LIKE txs INCLUDING DEFAULTS)"),
-        &[],
+        "DELETE FROM txs WHERE block_num >= $1 AND block_num <= $2",
+        &[&min_block, &max_block],
     )
     .await?;
 
-    conn.execute(&format!("TRUNCATE {staging_table}"), &[]).await?;
-
-    // Binary COPY into staging table
     let types = &[
         Type::INT8,       // block_num
         Type::TIMESTAMPTZ, // block_timestamp
@@ -107,10 +106,10 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            &format!(r#"COPY {staging_table} (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
+            r#"COPY txs (block_num, block_timestamp, idx, hash, type, "from", "to", value, input,
                 gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used,
                 nonce_key, nonce, fee_token, fee_payer, calls, call_count,
-                valid_before, valid_after, signature_type) FROM STDIN BINARY"#),
+                valid_before, valid_after, signature_type) FROM STDIN BINARY"#,
         )
         .await?;
 
@@ -149,34 +148,27 @@ pub async fn write_txs(pool: &Pool, txs: &[TxRow]) -> Result<()> {
 
     pinned_writer.as_mut().finish().await?;
 
-    conn.execute(
-        &format!(r#"INSERT INTO txs SELECT * FROM {staging_table} ON CONFLICT (block_timestamp, block_num, idx) DO NOTHING"#),
-        &[],
-    )
-    .await?;
-
     Ok(())
 }
 
-/// Batch insert logs using COPY for maximum throughput
+/// Batch insert logs using DELETE + COPY for maximum throughput
 pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
     if logs.is_empty() {
         return Ok(());
     }
 
     let conn = pool.get().await?;
+    conn.execute("SET statement_timeout = 0", &[]).await?;
 
-    let staging_table = format!("logs_staging_{}", std::process::id());
-    
+    // Get block range and delete existing rows before COPY
+    let min_block = logs.iter().map(|l| l.block_num).min().unwrap();
+    let max_block = logs.iter().map(|l| l.block_num).max().unwrap();
     conn.execute(
-        &format!("CREATE TEMP TABLE IF NOT EXISTS {staging_table} (LIKE logs INCLUDING DEFAULTS)"),
-        &[],
+        "DELETE FROM logs WHERE block_num >= $1 AND block_num <= $2",
+        &[&min_block, &max_block],
     )
     .await?;
 
-    conn.execute(&format!("TRUNCATE {staging_table}"), &[]).await?;
-
-    // Binary COPY into staging table
     let types = &[
         Type::INT8,       // block_num
         Type::TIMESTAMPTZ, // block_timestamp
@@ -191,7 +183,7 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     let sink = conn
         .copy_in(
-            &format!("COPY {staging_table} (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY"),
+            "COPY logs (block_num, block_timestamp, log_idx, tx_idx, tx_hash, address, selector, topics, data) FROM STDIN BINARY",
         )
         .await?;
 
@@ -217,30 +209,26 @@ pub async fn write_logs(pool: &Pool, logs: &[LogRow]) -> Result<()> {
 
     pinned_writer.as_mut().finish().await?;
 
-    conn.execute(
-        &format!("INSERT INTO logs SELECT * FROM {staging_table} ON CONFLICT (block_timestamp, block_num, log_idx) DO NOTHING"),
-        &[],
-    )
-    .await?;
-
     Ok(())
 }
 
-/// Batch insert receipts using COPY for maximum throughput
+/// Batch insert receipts using DELETE + COPY for maximum throughput
 pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> {
     if receipts.is_empty() {
         return Ok(());
     }
 
     let conn = pool.get().await?;
+    conn.execute("SET statement_timeout = 0", &[]).await?;
 
+    // Get block range and delete existing rows before COPY
+    let min_block = receipts.iter().map(|r| r.block_num).min().unwrap();
+    let max_block = receipts.iter().map(|r| r.block_num).max().unwrap();
     conn.execute(
-        "CREATE UNLOGGED TABLE IF NOT EXISTS receipts_staging (LIKE receipts INCLUDING DEFAULTS)",
-        &[],
+        "DELETE FROM receipts WHERE block_num >= $1 AND block_num <= $2",
+        &[&min_block, &max_block],
     )
     .await?;
-
-    conn.execute("TRUNCATE receipts_staging", &[]).await?;
 
     let types = &[
         Type::INT8,        // block_num
@@ -259,7 +247,7 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
 
     let sink = conn
         .copy_in(
-            r#"COPY receipts_staging (block_num, block_timestamp, tx_idx, tx_hash, "from", "to",
+            r#"COPY receipts (block_num, block_timestamp, tx_idx, tx_hash, "from", "to",
                 contract_address, gas_used, cumulative_gas_used, effective_gas_price,
                 status, fee_payer) FROM STDIN BINARY"#,
         )
@@ -289,12 +277,6 @@ pub async fn write_receipts(pool: &Pool, receipts: &[ReceiptRow]) -> Result<()> 
     }
 
     pinned_writer.as_mut().finish().await?;
-
-    conn.execute(
-        "INSERT INTO receipts SELECT * FROM receipts_staging ON CONFLICT (block_timestamp, block_num, tx_idx) DO NOTHING",
-        &[],
-    )
-    .await?;
 
     Ok(())
 }
