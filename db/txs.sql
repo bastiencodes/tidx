@@ -28,3 +28,5 @@ CREATE INDEX IF NOT EXISTS idx_txs_hash ON txs (hash);
 CREATE INDEX IF NOT EXISTS idx_txs_block_num ON txs (block_num);
 CREATE INDEX IF NOT EXISTS idx_txs_from ON txs ("from", block_timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_txs_to ON txs ("to", block_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_txs_calls ON txs USING GIN (calls);
+CREATE INDEX IF NOT EXISTS idx_txs_selector ON txs (substring(input, 1, 4)) WHERE input IS NOT NULL AND octet_length(input) >= 4;
