@@ -8,7 +8,6 @@ on:
     inputs:
       version:
         description: "Version bump type"
-        required: true
         type: choice
         options:
           - patch
