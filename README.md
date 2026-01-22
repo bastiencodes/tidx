@@ -446,15 +446,11 @@ make up                Start services (use LOCALNET=1 for localnet)
 make down              Stop all services
 make logs              Tail indexer logs
 make build             Build Docker image
+make seed              Generate transactions
 
-make test              Run tests
+make bench             Run benchmarks
 make check             Run clippy lints
-
-make seed              Generate transactions (DURATION=30 TPS=100)
-make seed-heavy        Generate ~1M+ txs with max variance
-
-make bench             Run benchmarks (restores from artifact)
-make bench-gen         Generate 5M tx seed artifact (run once)
+make test              Run tests
 
 make clean             Stop services and clean
 ```
