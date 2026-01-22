@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # ak47 installer
-# Usage: curl -L https://ak47.wevm.dev/install | bash
+# Usage: curl -L https://ak47.tempo.xyz/install | bash
 
-REPO="wevm/ak47"
+REPO="tempoxyz/ak47"
 INSTALL_DIR="${AK47_INSTALL_DIR:-$HOME/.ak47/bin}"
 
 main() {

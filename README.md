@@ -54,7 +54,7 @@
 ### Install
 
 ```bash
-curl -L https://ak47.wevm.dev/install | bash
+curl -L https://ak47.tempo.xyz/install | bash
 ```
 
 ### Run
@@ -100,7 +100,7 @@ ak47 uses a hybrid PostgreSQL + DuckDB architecture that automatically routes qu
 ### Quick Install
 
 ```bash
-curl -L https://ak47.wevm.dev/install | bash
+curl -L https://ak47.tempo.xyz/install | bash
 ```
 
 ### Docker
