@@ -33,6 +33,29 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: tidx
+          POSTGRES_PASSWORD: tidx
+          POSTGRES_DB: tidx
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tidx -d tidx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      tempo:
+        image: ghcr.io/tempoxyz/tempo:latest
+        ports:
+          - 8545:8545
+        options: >-
+          --health-cmd "curl -sf http://localhost:8545 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
 
@@ -43,4 +66,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: make test
+        env:
+          DATABASE_URL: postgres://tidx:tidx@localhost:5432/tidx
+          RPC_URL: http://localhost:8545
+        run: cargo test -- --test-threads=1 --nocapture
