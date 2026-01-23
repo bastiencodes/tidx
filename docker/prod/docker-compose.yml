@@ -29,6 +29,7 @@ services:
     restart: unless-stopped
 
   tidx:
+    # TODO: use latest tag
     image: ghcr.io/tempoxyz/tidx:6cb137c
     command:
       - up
