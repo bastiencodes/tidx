@@ -27,6 +27,15 @@ impl DuckDbPool {
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path).context("Failed to open DuckDB connection")?;
 
+        // Performance tuning
+        conn.execute_batch(
+            r#"
+            SET memory_limit = '4GB';
+            SET threads = 4;
+            SET checkpoint_threshold = '1GB';
+            "#,
+        )?;
+
         // Register native UDFs for fast hex parsing
         register_udfs(&conn)?;
 
