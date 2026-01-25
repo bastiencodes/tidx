@@ -514,7 +514,7 @@ impl Replicator {
             .query(
                 "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input,
                         gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce,
-                        fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type
+                        fee_token, fee_payer, calls::text, call_count, valid_before, valid_after, signature_type
                  FROM txs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, idx",
                 &[&start, &end],
             )
@@ -880,7 +880,7 @@ pub async fn backfill_from_postgres(
             .query(
                 "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input,
                         gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce,
-                        fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type
+                        fee_token, fee_payer, calls::text, call_count, valid_before, valid_after, signature_type
                  FROM txs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, idx",
                 &[&current, &end],
             )
@@ -1217,7 +1217,7 @@ pub async fn fill_gaps_from_postgres(
                 .query(
                     "SELECT block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input,
                             gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce,
-                            fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type
+                            fee_token, fee_payer, calls::text, call_count, valid_before, valid_after, signature_type
                      FROM txs WHERE block_num >= $1 AND block_num <= $2 ORDER BY block_num, idx",
                     &[&current, &end],
                 )
