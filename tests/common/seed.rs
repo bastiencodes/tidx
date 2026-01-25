@@ -128,15 +128,16 @@ pub async fn seed(pool: &Pool, config: &SeedConfig) -> Result<(u64, i64, u64)> {
                         tx_hash: tx_hash.clone(),
                         address: generate_address(rng.random_range(0..1000)),
                         selector: Some(random_selector(&mut rng)),
-                        topics: vec![
+                        topic0: Some(
                             random_selector(&mut rng)
                                 .into_iter()
                                 .chain(std::iter::repeat(0u8))
                                 .take(32)
                                 .collect(),
-                            generate_hash(rng.random(), 0x10C1),
-                            generate_hash(rng.random(), 0x10C2),
-                        ],
+                        ),
+                        topic1: Some(generate_hash(rng.random(), 0x10C1)),
+                        topic2: Some(generate_hash(rng.random(), 0x10C2)),
+                        topic3: None,
                         data: vec![0u8; rng.random_range(32..128)],
                     });
                 }

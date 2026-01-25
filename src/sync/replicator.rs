@@ -201,7 +201,6 @@ impl Replicator {
 
         // Limit how much we sync per tick to stay responsive
         let sync_end = duck_watermark + lag.min(MAX_BLOCKS_PER_TICK);
-        let _blocks_to_sync = sync_end - duck_watermark;
 
         tracing::debug!(
             chain_id = self.chain_id,

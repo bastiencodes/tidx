@@ -1145,12 +1145,12 @@ async fn test_query_fallback_to_postgres_without_duckdb() {
 
 #[tokio::test]
 #[serial(db)]
-async fn test_event_signature_selector() {
+async fn test_event_signature_topic0() {
     let sig = EventSignature::parse("Transfer(address,address,uint256)").unwrap();
-    assert_eq!(sig.selector_hex(), "ddf252ad");
+    assert!(sig.topic0_hex().starts_with("ddf252ad"));
 
     let sig = EventSignature::parse("Approval(address,address,uint256)").unwrap();
-    assert_eq!(sig.selector_hex(), "8c5be1e5");
+    assert!(sig.topic0_hex().starts_with("8c5be1e5"));
 }
 
 // ============================================================================
