@@ -161,6 +161,12 @@ pub struct ChainConfig {
     /// Number of concurrent gap-fill workers (default: 4)
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+
+    /// Complete backfill before starting realtime sync (default: false)
+    /// When true, syncs all gaps to genesis before following chain head.
+    /// When false (default), runs realtime and backfill concurrently.
+    #[serde(default)]
+    pub backfill_first: bool,
 }
 
 fn default_backfill() -> bool {

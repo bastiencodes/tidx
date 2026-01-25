@@ -218,13 +218,16 @@ fn spawn_sync_engine(
         "Starting sync for chain"
     );
 
+    let backfill_first = chain.backfill_first;
+
     tokio::spawn(async move {
         // Create sync engine with broadcaster and config
         let mut engine = match SyncEngine::new(pool, &chain.rpc_url).await {
             Ok(e) => e
                 .with_broadcaster(broadcaster)
                 .with_batch_size(chain.batch_size)
-                .with_concurrency(chain.concurrency),
+                .with_concurrency(chain.concurrency)
+                .with_backfill_first(backfill_first),
             Err(e) => {
                 error!(error = %e, chain = %chain.name, "Failed to create sync engine");
                 return;

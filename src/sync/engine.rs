@@ -28,6 +28,7 @@ pub struct SyncEngine {
     replicator: Option<ReplicatorHandle>,
     batch_size: u64,
     concurrency: usize,
+    backfill_first: bool,
 }
 
 impl SyncEngine {
@@ -45,6 +46,7 @@ impl SyncEngine {
             replicator: None,
             batch_size: 100,
             concurrency: 4,
+            backfill_first: false,
         })
     }
 
@@ -68,10 +70,110 @@ impl SyncEngine {
         self
     }
 
+    pub fn with_backfill_first(mut self, backfill_first: bool) -> Self {
+        self.backfill_first = backfill_first;
+        self
+    }
+
     /// Run sync engine with two concurrent loops:
     /// - Realtime: always follows chain head immediately
     /// - Gap-fill: fills any gaps in background using detect_gaps
+    ///
+    /// If backfill_first is true, completes all backfill before starting realtime.
     pub async fn run(&mut self, shutdown: broadcast::Receiver<()>) -> Result<()> {
+        if self.backfill_first {
+            self.run_backfill_first(shutdown).await
+        } else {
+            self.run_concurrent(shutdown).await
+        }
+    }
+
+    /// Run backfill to completion, then switch to realtime sync.
+    async fn run_backfill_first(&mut self, shutdown: broadcast::Receiver<()>) -> Result<()> {
+        let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
+        let mut progress = SyncProgress::new(self.chain_id, state.synced_num);
+        let mut shutdown_rx = shutdown.resubscribe();
+
+        info!(
+            chain_id = self.chain_id,
+            tip_num = state.tip_num,
+            synced_num = state.synced_num,
+            "Starting sync engine in backfill-first mode"
+        );
+
+        // Phase 1: Complete all backfill
+        loop {
+            // Check for shutdown
+            if shutdown_rx.try_recv().is_ok() {
+                info!("Shutting down during backfill");
+                return Ok(());
+            }
+
+            // Get current head to know our target
+            let remote_head = self.rpc.latest_block_number().await?;
+            update_tip_num(&self.pool, self.chain_id, remote_head, remote_head).await?;
+
+            // Check for gaps
+            let gaps = detect_all_gaps(&self.pool, remote_head).await?;
+            if gaps.is_empty() {
+                info!(
+                    chain_id = self.chain_id,
+                    head = remote_head,
+                    "Backfill complete, switching to realtime sync"
+                );
+                break;
+            }
+
+            let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+            info!(
+                chain_id = self.chain_id,
+                gaps = gaps.len(),
+                total_blocks = total_gap_blocks,
+                head = remote_head,
+                "Backfill in progress"
+            );
+
+            // Run one round of gap-fill (no throttling in backfill-first mode)
+            if let Err(e) = tick_gapfill_parallel_no_throttle(
+                &self.pool,
+                &self.rpc,
+                self.chain_id,
+                self.batch_size,
+                self.concurrency,
+                &self.replicator,
+                &mut progress,
+            )
+            .await
+            {
+                error!(error = %e, "Backfill tick failed");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+
+        // Phase 2: Run realtime sync (no gap-fill needed)
+        let mut realtime_progress = SyncProgress::new(self.chain_id, state.tip_num);
+        info!(chain_id = self.chain_id, "Starting realtime sync");
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!("Shutting down sync engine");
+                    break;
+                }
+                result = self.tick_realtime(&mut realtime_progress) => {
+                    if let Err(e) = result {
+                        error!(error = %e, "Realtime sync tick failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run realtime and gap-fill concurrently (default mode).
+    async fn run_concurrent(&mut self, shutdown: broadcast::Receiver<()>) -> Result<()> {
         let state = load_sync_state(&self.pool, self.chain_id).await?.unwrap_or_default();
         let mut realtime_progress = SyncProgress::new(self.chain_id, state.tip_num);
 
@@ -817,6 +919,154 @@ async fn tick_gapfill_parallel(
     );
 
     // Update backfill_num to track progress (lowest block we've reached)
+    if lowest_block < u64::MAX {
+        let mut updated_state = state.clone();
+        updated_state.backfill_num = Some(lowest_block);
+        save_sync_state(pool, &updated_state).await?;
+    }
+
+    Ok(())
+}
+
+/// Same as tick_gapfill_parallel but without lag throttling (for backfill-first mode)
+async fn tick_gapfill_parallel_no_throttle(
+    pool: &Pool,
+    rpc: &RpcClient,
+    chain_id: u64,
+    batch_size: u64,
+    concurrency: usize,
+    replicator: &Option<ReplicatorHandle>,
+    progress: &mut SyncProgress,
+) -> Result<()> {
+    let state = load_sync_state(pool, chain_id).await?.unwrap_or_default();
+
+    // Detect ALL gaps including from genesis, sorted by end DESC (most recent first)
+    let gaps = detect_all_gaps(pool, state.tip_num).await?;
+
+    if gaps.is_empty() {
+        if state.synced_num < state.tip_num {
+            update_synced_num(pool, chain_id, state.tip_num).await?;
+            info!(synced_num = state.tip_num, "Backfill: fully synced");
+        }
+        return Ok(());
+    }
+
+    let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
+    let gap_count = gaps.len();
+
+    // Collect all batch ranges to process (from most recent gaps first)
+    let mut batch_ranges: Vec<(u64, u64)> = Vec::new();
+    for (gap_start, gap_end) in &gaps {
+        let mut current_end = *gap_end;
+        while current_end >= *gap_start {
+            let current_start = current_end.saturating_sub(batch_size - 1).max(*gap_start);
+            batch_ranges.push((current_start, current_end));
+            if current_start == *gap_start {
+                break;
+            }
+            current_end = current_start.saturating_sub(1);
+        }
+    }
+
+    let total_batches = batch_ranges.len();
+    debug!(
+        gap_count = gap_count,
+        total_blocks = total_gap_blocks,
+        total_batches = total_batches,
+        concurrency = concurrency,
+        "Backfill: processing with parallel workers"
+    );
+
+    // Process batches with N concurrent workers using JoinSet
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut batch_iter = batch_ranges.into_iter();
+    let mut completed = 0u64;
+    let mut lowest_block = u64::MAX;
+    let tick_start = std::time::Instant::now();
+
+    // Seed initial concurrent tasks
+    for _ in 0..concurrency {
+        if let Some((start, end)) = batch_iter.next() {
+            let pool = pool.clone();
+            let rpc = rpc.clone();
+            let rep = replicator.clone();
+            join_set.spawn(async move {
+                let result = sync_range_standalone(&pool, &rpc, start, end, rep.as_ref()).await;
+                (start, end, result)
+            });
+        }
+    }
+
+    // Process results and spawn new tasks as workers complete
+    while let Some(join_result) = join_set.join_next().await {
+        let (start, end, result) = join_result?;
+        match result {
+            Ok(()) => {
+                let batch_count = end - start + 1;
+                completed += batch_count;
+                lowest_block = lowest_block.min(start);
+                metrics::record_blocks_indexed(chain_id, batch_count);
+                progress.report_backfill(start, 0, batch_count);
+
+                debug!(
+                    from = start,
+                    to = end,
+                    completed = completed,
+                    "Backfill: wrote batch"
+                );
+            }
+            Err(e) => {
+                error!(
+                    from = start,
+                    to = end,
+                    error = %e,
+                    "Backfill: batch failed, will retry"
+                );
+                let pool = pool.clone();
+                let rpc = rpc.clone();
+                let rep = replicator.clone();
+                join_set.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    let result = sync_range_standalone(&pool, &rpc, start, end, rep.as_ref()).await;
+                    (start, end, result)
+                });
+                continue;
+            }
+        }
+
+        // Spawn next batch if available
+        if let Some((start, end)) = batch_iter.next() {
+            let pool = pool.clone();
+            let rpc = rpc.clone();
+            let rep = replicator.clone();
+            join_set.spawn(async move {
+                let result = sync_range_standalone(&pool, &rpc, start, end, rep.as_ref()).await;
+                (start, end, result)
+            });
+        }
+    }
+
+    // Calculate and save the sync rate
+    let elapsed = tick_start.elapsed().as_secs_f64();
+    let rate = if elapsed > 0.0 {
+        completed as f64 / elapsed
+    } else {
+        0.0
+    };
+
+    if rate > 0.0 {
+        update_sync_rate(pool, chain_id, rate).await.ok();
+    }
+
+    info!(
+        completed = completed,
+        gap_count = gap_count,
+        lowest_block = lowest_block,
+        rate = format!("{:.1} blk/s", rate),
+        "Backfill: completed round"
+    );
+
+    // Update backfill_num to track progress
     if lowest_block < u64::MAX {
         let mut updated_state = state.clone();
         updated_state.backfill_num = Some(lowest_block);
