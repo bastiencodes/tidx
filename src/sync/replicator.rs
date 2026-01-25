@@ -149,69 +149,97 @@ impl Replicator {
     async fn process_batch(&self, batch: ReplicaBatch) -> Result<()> {
         let conn = self.duckdb.conn().await;
 
+        // Helper to reset connection state after errors
+        let rollback_if_needed = |conn: &duckdb::Connection| {
+            let _ = conn.execute("ROLLBACK", []);
+        };
+
         match batch {
             ReplicaBatch::Blocks(blocks) => {
                 let count = blocks.len();
                 if count > 0 {
-                    let mut appender = conn.appender("blocks")?;
-                    for block in blocks {
-                        appender.append_row(duckdb::params![
+                    // Use INSERT OR IGNORE to handle duplicates gracefully
+                    for block in &blocks {
+                        let sql = format!(
+                            "INSERT OR IGNORE INTO blocks (num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data) VALUES ({}, '0x{}', '0x{}', '{}', {}, {}, {}, '0x{}', {})",
                             block.num,
-                            format!("0x{}", hex::encode(&block.hash)),
-                            format!("0x{}", hex::encode(&block.parent_hash)),
+                            hex::encode(&block.hash),
+                            hex::encode(&block.parent_hash),
                             block.timestamp.to_rfc3339(),
                             block.timestamp_ms,
                             block.gas_limit,
                             block.gas_used,
-                            format!("0x{}", hex::encode(&block.miner)),
-                            block.extra_data.as_ref().map(|d| format!("0x{}", hex::encode(d))),
-                        ])?;
+                            hex::encode(&block.miner),
+                            block.extra_data.as_ref().map(|d| format!("'0x{}'", hex::encode(d))).unwrap_or_else(|| "NULL".to_string()),
+                        );
+                        if let Err(e) = conn.execute(&sql, []) {
+                            tracing::warn!(error = %e, block_num = block.num, "Failed to insert block, skipping");
+                            rollback_if_needed(&conn);
+                        }
                     }
-                    appender.flush()?;
                 }
-                Self::update_watermark(&conn)?;
+                if let Err(e) = Self::update_watermark(&conn) {
+                    rollback_if_needed(&conn);
+                    return Err(e);
+                }
                 tracing::debug!(count, "Replicated blocks to DuckDB");
             }
             ReplicaBatch::Txs(txs) => {
                 let count = txs.len();
                 if count > 0 {
-                    let mut appender = conn.appender("txs")?;
-                    for tx in txs {
-                        appender.append_row(duckdb::params![
-                            tx.block_num,
-                            tx.block_timestamp.to_rfc3339(),
-                            tx.idx,
-                            format!("0x{}", hex::encode(&tx.hash)),
-                            tx.tx_type,
-                            format!("0x{}", hex::encode(&tx.from)),
-                            tx.to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
-                            tx.value.clone(),
-                            format!("0x{}", hex::encode(&tx.input)),
-                            tx.gas_limit,
-                            tx.max_fee_per_gas.clone(),
-                            tx.max_priority_fee_per_gas.clone(),
-                            tx.gas_used,
-                            format!("0x{}", hex::encode(&tx.nonce_key)),
-                            tx.nonce,
-                            tx.fee_token.as_ref().map(|t| format!("0x{}", hex::encode(t))),
-                            tx.fee_payer.as_ref().map(|t| format!("0x{}", hex::encode(t))),
-                            tx.calls.as_ref().map(|c| c.to_string()),
-                            tx.call_count,
-                            tx.valid_before,
-                            tx.valid_after,
-                            tx.signature_type,
-                        ])?;
+                    // Batch txs into chunks with INSERT OR IGNORE
+                    for chunk in txs.chunks(100) {
+                        let values: Vec<String> = chunk
+                            .iter()
+                            .map(|tx| {
+                                format!(
+                                    "({}, '{}', {}, '0x{}', {}, '0x{}', {}, '{}', '0x{}', {}, '{}', '{}', {}, '0x{}', {}, {}, {}, {}, {}, {}, {}, {})",
+                                    tx.block_num,
+                                    tx.block_timestamp.to_rfc3339(),
+                                    tx.idx,
+                                    hex::encode(&tx.hash),
+                                    tx.tx_type,
+                                    hex::encode(&tx.from),
+                                    tx.to.as_ref().map(|t| format!("'0x{}'", hex::encode(t))).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.value,
+                                    hex::encode(&tx.input),
+                                    tx.gas_limit,
+                                    tx.max_fee_per_gas,
+                                    tx.max_priority_fee_per_gas,
+                                    tx.gas_used.map(|g| g.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                                    hex::encode(&tx.nonce_key),
+                                    tx.nonce,
+                                    tx.fee_token.as_ref().map(|t| format!("'0x{}'", hex::encode(t))).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.fee_payer.as_ref().map(|t| format!("'0x{}'", hex::encode(t))).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.calls.as_ref().map(|c| format!("'{}'", c.to_string().replace('\'', "''"))).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.call_count,
+                                    tx.valid_before.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.valid_after.map(|v| v.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                                    tx.signature_type.map(|s| s.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                                )
+                            })
+                            .collect();
+                        
+                        let sql = format!(
+                            "INSERT OR IGNORE INTO txs (block_num, block_timestamp, idx, hash, type, \"from\", \"to\", value, input, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, gas_used, nonce_key, nonce, fee_token, fee_payer, calls, call_count, valid_before, valid_after, signature_type) VALUES {}",
+                            values.join(", ")
+                        );
+                        if let Err(e) = conn.execute(&sql, []) {
+                            tracing::warn!(error = %e, "Failed to insert tx batch, skipping");
+                            rollback_if_needed(&conn);
+                        }
                     }
-                    appender.flush()?;
                 }
-                Self::update_watermark(&conn)?;
+                if let Err(e) = Self::update_watermark(&conn) {
+                    rollback_if_needed(&conn);
+                    return Err(e);
+                }
                 tracing::debug!(count, "Replicated txs to DuckDB");
             }
             ReplicaBatch::Logs(logs) => {
                 let count = logs.len();
                 if count > 0 {
                     // Batch logs into chunks for fewer INSERT statements
-                    // Each chunk is its own transaction to avoid stuck aborted state
                     for chunk in logs.chunks(100) {
                         let values: Vec<String> = chunk
                             .iter()
@@ -250,35 +278,56 @@ impl Replicator {
                         );
                         if let Err(e) = conn.execute(&sql, []) {
                             tracing::warn!(error = %e, "Failed to insert log batch, skipping");
+                            rollback_if_needed(&conn);
                         }
                     }
                 }
-                Self::update_watermark(&conn)?;
+                if let Err(e) = Self::update_watermark(&conn) {
+                    rollback_if_needed(&conn);
+                    return Err(e);
+                }
                 tracing::debug!(count, "Replicated logs to DuckDB");
             }
             ReplicaBatch::Receipts(receipts) => {
                 let count = receipts.len();
                 if count > 0 {
-                    let mut appender = conn.appender("receipts")?;
-                    for receipt in receipts {
-                        appender.append_row(duckdb::params![
-                            receipt.block_num,
-                            receipt.block_timestamp.to_rfc3339(),
-                            receipt.tx_idx,
-                            format!("0x{}", hex::encode(&receipt.tx_hash)),
-                            format!("0x{}", hex::encode(&receipt.from)),
-                            receipt.to.as_ref().map(|t| format!("0x{}", hex::encode(t))),
-                            receipt.contract_address.as_ref().map(|a| format!("0x{}", hex::encode(a))),
-                            receipt.gas_used,
-                            receipt.cumulative_gas_used,
-                            receipt.effective_gas_price.clone(),
-                            receipt.status,
-                            receipt.fee_payer.as_ref().map(|p| format!("0x{}", hex::encode(p))),
-                        ])?;
+                    // Batch receipts into chunks with INSERT OR IGNORE
+                    for chunk in receipts.chunks(100) {
+                        let values: Vec<String> = chunk
+                            .iter()
+                            .map(|receipt| {
+                                format!(
+                                    "({}, '{}', {}, '0x{}', '0x{}', {}, {}, {}, {}, {}, {}, {})",
+                                    receipt.block_num,
+                                    receipt.block_timestamp.to_rfc3339(),
+                                    receipt.tx_idx,
+                                    hex::encode(&receipt.tx_hash),
+                                    hex::encode(&receipt.from),
+                                    receipt.to.as_ref().map(|t| format!("'0x{}'", hex::encode(t))).unwrap_or_else(|| "NULL".to_string()),
+                                    receipt.contract_address.as_ref().map(|a| format!("'0x{}'", hex::encode(a))).unwrap_or_else(|| "NULL".to_string()),
+                                    receipt.gas_used,
+                                    receipt.cumulative_gas_used,
+                                    receipt.effective_gas_price.as_ref().map(|p| format!("'{}'", p)).unwrap_or_else(|| "NULL".to_string()),
+                                    receipt.status.map(|s| s.to_string()).unwrap_or_else(|| "NULL".to_string()),
+                                    receipt.fee_payer.as_ref().map(|p| format!("'0x{}'", hex::encode(p))).unwrap_or_else(|| "NULL".to_string()),
+                                )
+                            })
+                            .collect();
+                        
+                        let sql = format!(
+                            "INSERT OR IGNORE INTO receipts (block_num, block_timestamp, tx_idx, tx_hash, \"from\", \"to\", contract_address, gas_used, cumulative_gas_used, effective_gas_price, status, fee_payer) VALUES {}",
+                            values.join(", ")
+                        );
+                        if let Err(e) = conn.execute(&sql, []) {
+                            tracing::warn!(error = %e, "Failed to insert receipt batch, skipping");
+                            rollback_if_needed(&conn);
+                        }
                     }
-                    appender.flush()?;
                 }
-                Self::update_watermark(&conn)?;
+                if let Err(e) = Self::update_watermark(&conn) {
+                    rollback_if_needed(&conn);
+                    return Err(e);
+                }
                 tracing::debug!(count, "Replicated receipts to DuckDB");
             }
         }
