@@ -54,6 +54,17 @@ impl DuckDbPool {
         Self::new(":memory:")
     }
 
+    /// Opens a read-only connection to an existing DuckDB database.
+    /// Use this for status queries when the main indexer may have the file locked.
+    pub fn open_readonly(path: &str) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, duckdb::Config::default().access_mode(duckdb::AccessMode::ReadOnly)?)?;
+        register_udfs(&conn)?;
+        Ok(Self {
+            path: path.to_string(),
+            write_conn: Mutex::new(conn),
+        })
+    }
+
     /// Gets the write connection (mutex-protected, blocks other writers).
     pub async fn conn(&self) -> tokio::sync::MutexGuard<'_, Connection> {
         self.write_conn.lock().await

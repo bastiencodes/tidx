@@ -251,7 +251,7 @@ async fn print_status(config: &Config) -> Result<()> {
             if let Some(ref duckdb_path) = chain.duckdb_path {
                 println!("│");
                 println!("│  DuckDB (OLAP)");
-                match DuckDbPool::new(duckdb_path) {
+                match DuckDbPool::open_readonly(duckdb_path) {
                     Ok(duckdb) => {
                         let duckdb = Arc::new(duckdb);
                         if let Ok((duck_min, duck_max)) = duckdb.block_range().await {
