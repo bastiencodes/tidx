@@ -30,9 +30,10 @@ impl DuckDbPool {
         // Performance tuning
         conn.execute_batch(
             r#"
-            SET memory_limit = '4GB';
+            SET memory_limit = '16GB';
             SET threads = 4;
             SET checkpoint_threshold = '1GB';
+            SET preserve_insertion_order = false;
             "#,
         )?;
 
