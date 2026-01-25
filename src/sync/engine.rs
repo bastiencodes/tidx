@@ -165,10 +165,27 @@ impl SyncEngine {
         const BATCH_SIZE: u64 = 10;
         let mut current_from = start_from;
         let mut current_to = (current_from + BATCH_SIZE - 1).min(remote_head);
+        
+        let fetch_start = std::time::Instant::now();
         let mut current_fetch = Some(self.fetch_range(current_from, current_to).await?);
+        let initial_fetch_ms = fetch_start.elapsed().as_millis();
+        if initial_fetch_ms > 1000 {
+            tracing::warn!(
+                chain_id = self.chain_id,
+                fetch_ms = initial_fetch_ms,
+                from = current_from,
+                to = current_to,
+                "Slow initial RPC fetch"
+            );
+        }
 
         while current_from <= remote_head {
+            let batch_start = std::time::Instant::now();
             let (blocks, block_rows, all_txs, all_logs, all_receipts) = current_fetch.take().unwrap();
+            
+            // Capture counts before moving into async block
+            let tx_count = all_txs.len() as u64;
+            let log_count = all_logs.len() as u64;
 
             let next_from = current_to + 1;
             let next_to = (next_from + BATCH_SIZE - 1).min(remote_head);
@@ -185,11 +202,14 @@ impl SyncEngine {
             let all_txs_clone = all_txs.clone();
             let all_logs_clone = all_logs.clone();
             let all_receipts_clone = all_receipts.clone();
-            let write_future = async {
-                write_blocks(&self.pool, &block_rows).await?;
-                write_txs(&self.pool, &all_txs).await?;
-                write_logs(&self.pool, &all_logs).await?;
-                write_receipts(&self.pool, &all_receipts).await?;
+            let pool = self.pool.clone();
+            let write_future = async move {
+                let write_start = std::time::Instant::now();
+                write_blocks(&pool, &block_rows).await?;
+                write_txs(&pool, &all_txs).await?;
+                write_logs(&pool, &all_logs).await?;
+                write_receipts(&pool, &all_receipts).await?;
+                let write_ms = write_start.elapsed().as_millis();
 
                 if let Some(ref rep) = replicator {
                     rep.send_blocks(block_rows_clone);
@@ -198,23 +218,41 @@ impl SyncEngine {
                     rep.send_receipts(all_receipts_clone);
                 }
 
-                Ok::<_, anyhow::Error>(())
+                Ok::<_, anyhow::Error>(write_ms)
             };
 
+            let write_ms;
+            let fetch_ms;
             if let Some(fetch_fut) = next_fetch_future {
+                let fetch_start = std::time::Instant::now();
                 let (write_result, fetch_result) = tokio::join!(write_future, fetch_fut);
-                write_result?;
+                write_ms = write_result?;
+                fetch_ms = fetch_start.elapsed().as_millis();
                 current_fetch = Some(fetch_result?);
             } else {
-                write_future.await?;
+                write_ms = write_future.await?;
+                fetch_ms = 0;
             }
 
             // Update only tip_num (partial update to avoid clobbering synced_num)
             update_tip_num(&self.pool, self.chain_id, current_to, remote_head).await?;
+            
+            let batch_ms = batch_start.elapsed().as_millis();
+            let block_count = blocks.len();
+            if batch_ms > 2000 {
+                tracing::warn!(
+                    chain_id = self.chain_id,
+                    batch_ms,
+                    write_ms,
+                    fetch_ms,
+                    blocks = block_count,
+                    from = current_from,
+                    to = current_to,
+                    "Slow realtime batch"
+                );
+            }
 
             let block_count = blocks.len() as u64;
-            let tx_count = all_txs.len() as u64;
-            let log_count = all_logs.len() as u64;
 
             metrics::record_blocks_indexed(self.chain_id, block_count);
             metrics::record_txs_indexed(self.chain_id, tx_count);
