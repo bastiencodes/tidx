@@ -152,11 +152,39 @@ async fn handle_status(State(state): State<AppState>) -> Result<Json<StatusRespo
     for chain in &mut all_chains {
         let chain_id = chain.chain_id as u64;
         if let Some(duckdb_pool) = duckdb_pools.get(&chain_id) {
+            // Get DuckDB range
+            if let Ok((duck_min, duck_max)) = duckdb_pool.block_range().await {
+                let duck_min = duck_min.unwrap_or(0);
+                let duck_max = duck_max.unwrap_or(0);
+                
+                chain.duckdb_min = Some(duck_min);
+                chain.duckdb_max = Some(duck_max);
+                chain.duckdb_tip_lag = Some(chain.tip_num - duck_max);
+                
+                // Backfill remaining = blocks below duck_min that PG has
+                if duck_min > 0 {
+                    // Get PG min for this chain
+                    let pools = state.pools.read().await;
+                    if let Some(pool) = pools.get(&chain_id) {
+                        if let Ok(conn) = pool.get().await {
+                            if let Ok(row) = conn.query_one("SELECT COALESCE(MIN(num), 0) FROM blocks", &[]).await {
+                                let pg_min: i64 = row.get(0);
+                                chain.duckdb_backfill_remaining = Some((duck_min - pg_min).max(0));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Get gap info
             if let Ok(duck_status) = crate::sync::get_sync_status(duckdb_pool).await {
-                chain.duckdb_synced_num = Some(duck_status.latest_block);
-                chain.duckdb_lag = Some(chain.synced_num - duck_status.latest_block);
-                chain.duckdb_gap_blocks = Some(duck_status.gap_blocks);
+                chain.duckdb_internal_gaps = Some(duck_status.gap_blocks);
                 chain.duckdb_gaps = duck_status.gaps;
+                
+                // Deprecated fields for backwards compatibility
+                chain.duckdb_synced_num = Some(duck_status.latest_block);
+                chain.duckdb_lag = Some(chain.tip_num - duck_status.latest_block);
+                chain.duckdb_gap_blocks = Some(duck_status.gap_blocks);
             }
         }
     }

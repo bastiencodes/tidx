@@ -25,6 +25,17 @@ pub struct SyncStatus {
     pub eta_secs: Option<f64>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_min: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_max: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_tip_lag: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_backfill_remaining: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duckdb_internal_gaps: Option<i64>,
+    // Deprecated: use duckdb_max instead
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub duckdb_synced_num: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duckdb_lag: Option<i64>,
@@ -92,6 +103,11 @@ pub async fn get_all_status(pool: &Pool) -> Result<Vec<SyncStatus>> {
                 sync_rate,
                 eta_secs,
                 updated_at: row.get(6),
+                duckdb_min: None,
+                duckdb_max: None,
+                duckdb_tip_lag: None,
+                duckdb_backfill_remaining: None,
+                duckdb_internal_gaps: None,
                 duckdb_synced_num: None,
                 duckdb_lag: None,
                 duckdb_gap_blocks: None,
