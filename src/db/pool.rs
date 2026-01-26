@@ -45,7 +45,7 @@ pub struct ThrottledPool {
 
 impl ThrottledPool {
     pub async fn new(database_url: &str) -> Result<Self> {
-        Self::with_limits(database_url, 16, 6).await
+        Self::with_limits(database_url, 24, 12).await
     }
 
     /// Create with custom pool size and backfill limit.
@@ -65,7 +65,7 @@ impl ThrottledPool {
     pub fn from_pool(pool: Pool) -> Self {
         Self {
             pool,
-            backfill_semaphore: Arc::new(Semaphore::new(6)),
+            backfill_semaphore: Arc::new(Semaphore::new(12)),
         }
     }
 

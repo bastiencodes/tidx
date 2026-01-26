@@ -22,7 +22,7 @@ use super::writer::{
 
 /// RPC concurrency limits
 const REALTIME_RPC_CONCURRENCY: usize = 4;
-const BACKFILL_RPC_CONCURRENCY: usize = 4;
+const BACKFILL_RPC_CONCURRENCY: usize = 16;
 
 pub struct SyncEngine {
     /// Throttled pool - shared by all, but backfill is rate-limited
