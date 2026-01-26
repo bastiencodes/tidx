@@ -33,8 +33,6 @@ pub struct Replicator {
     chain_id: u64,
     /// Flag set when channel receives data, signals to poll immediately
     needs_sync: Arc<AtomicBool>,
-    /// If true, gap-fill waits until PG has no gaps before starting
-    wait_for_pg: bool,
 }
 
 /// Handle for sending hints to the replicator.
@@ -87,22 +85,10 @@ impl ReplicatorHandle {
 impl Replicator {
     /// Creates a new replicator with a channel for receiving batches.
     pub fn new(duckdb: Arc<DuckDbPool>, pg_pool: Pool, buffer_size: usize, chain_id: u64) -> (Self, ReplicatorHandle) {
-        Self::with_options(duckdb, pg_pool, buffer_size, chain_id, true)
-    }
-
-    /// Creates a new replicator with configurable wait_for_pg option.
-    /// If wait_for_pg is true, gap-fill waits until PG has no gaps before starting.
-    pub fn with_options(
-        duckdb: Arc<DuckDbPool>,
-        pg_pool: Pool,
-        buffer_size: usize,
-        chain_id: u64,
-        wait_for_pg: bool,
-    ) -> (Self, ReplicatorHandle) {
         let (tx, rx) = mpsc::channel(buffer_size);
         let needs_sync = Arc::new(AtomicBool::new(false));
         (
-            Self { duckdb, pg_pool, rx, chain_id, needs_sync: needs_sync.clone(), wait_for_pg },
+            Self { duckdb, pg_pool, rx, chain_id, needs_sync: needs_sync.clone() },
             ReplicatorHandle { tx, needs_sync },
         )
     }
@@ -113,18 +99,17 @@ impl Replicator {
     ///
     /// Both tasks share the same DuckDB pool (writes serialize on mutex).
     pub async fn run(mut self) -> Result<()> {
-        tracing::info!(chain_id = self.chain_id, wait_for_pg = self.wait_for_pg, "DuckDB replicator started");
+        tracing::info!(chain_id = self.chain_id, "DuckDB replicator started");
 
         let duckdb = self.duckdb.clone();
         let pg_pool = self.pg_pool.clone();
         let chain_id = self.chain_id;
-        let wait_for_pg = self.wait_for_pg;
 
         // Spawn gap-fill task (runs continuously until caught up)
         let gap_fill_duckdb = duckdb.clone();
         let gap_fill_pg = pg_pool.clone();
         let gap_fill_handle = tokio::spawn(async move {
-            Self::run_gap_fill_task(gap_fill_duckdb, gap_fill_pg, chain_id, wait_for_pg).await
+            Self::run_gap_fill_task(gap_fill_duckdb, gap_fill_pg, chain_id).await
         });
 
         // Run tail task in current task
@@ -198,68 +183,12 @@ impl Replicator {
 
     /// Gap-fill task: high-throughput backfill of historical blocks.
     /// Runs continuously until fully synced, then sleeps.
-    /// If wait_for_pg is true, waits for PG to have no gaps before starting.
     async fn run_gap_fill_task(
         duckdb: Arc<DuckDbPool>,
         pg_pool: Pool,
         chain_id: u64,
-        wait_for_pg: bool,
     ) -> Result<()> {
-        tracing::info!(chain_id, wait_for_pg, "DuckDB gap-fill task started");
-
-        // If wait_for_pg is enabled, wait until PG has no gaps
-        if wait_for_pg {
-            loop {
-                let pg_conn = match pg_pool.get().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        tracing::warn!(chain_id, error = %e, "Failed to get PG connection, retrying...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        continue;
-                    }
-                };
-
-                // Check if PG has any gaps by looking at sync_state
-                let row = pg_conn
-                    .query_one(
-                        "SELECT tip_num, synced_num FROM sync_state WHERE chain_id = $1",
-                        &[&(chain_id as i64)],
-                    )
-                    .await;
-
-                match row {
-                    Ok(row) => {
-                        let tip_num: i64 = row.get(0);
-                        let synced_num: i64 = row.get(1);
-                        
-                        // PG is fully synced when synced_num >= tip_num and both are > 0
-                        if synced_num >= tip_num && synced_num > 0 {
-                            tracing::info!(
-                                chain_id,
-                                tip_num,
-                                synced_num,
-                                "PG backfill complete, starting DuckDB gap-fill"
-                            );
-                            break;
-                        }
-
-                        let remaining = tip_num - synced_num;
-                        tracing::info!(
-                            chain_id,
-                            tip_num,
-                            synced_num,
-                            remaining,
-                            "Waiting for PG backfill to complete before DuckDB gap-fill..."
-                        );
-                    }
-                    Err(_) => {
-                        tracing::debug!(chain_id, "No sync_state yet, waiting...");
-                    }
-                }
-
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-        }
+        tracing::info!(chain_id, "DuckDB gap-fill task started");
 
         let mut total_synced: i64 = 0;
         let start_time = Instant::now();

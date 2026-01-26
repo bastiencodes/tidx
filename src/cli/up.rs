@@ -189,18 +189,11 @@ async fn initialize_chain(
     db::run_migrations(&throttled_pool.pool).await?;
 
     let replicator_handle = if let Some(ref duckdb_path) = chain.duckdb_path {
-        info!(chain = %chain.name, path = %duckdb_path, duckdb_after_pg = chain.duckdb_after_pg, "Initializing DuckDB");
+        info!(chain = %chain.name, path = %duckdb_path, "Initializing DuckDB");
         let duckdb_pool = Arc::new(DuckDbPool::new(duckdb_path)?);
 
         // Replicator uses the shared pool (its gap-fill is lower priority)
-        // If duckdb_after_pg is true (default), gap-fill waits for PG to complete first
-        let (replicator, handle) = Replicator::with_options(
-            duckdb_pool.clone(),
-            throttled_pool.pool.clone(),
-            10_000,
-            chain.chain_id,
-            chain.duckdb_after_pg,
-        );
+        let (replicator, handle) = Replicator::new(duckdb_pool.clone(), throttled_pool.pool.clone(), 10_000, chain.chain_id);
         tokio::spawn(replicator.run());
 
         duckdb_pools.write().await.insert(chain.chain_id, duckdb_pool);

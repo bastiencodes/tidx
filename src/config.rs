@@ -167,16 +167,6 @@ pub struct ChainConfig {
     /// When false (default), runs realtime and backfill concurrently.
     #[serde(default)]
     pub backfill_first: bool,
-
-    /// Delay DuckDB replication until PG backfill completes (default: true)
-    /// When true, DuckDB gap-fill waits for PG to be fully synced first.
-    /// This improves overall throughput by avoiding resource contention.
-    #[serde(default = "default_duckdb_after_pg")]
-    pub duckdb_after_pg: bool,
-}
-
-fn default_duckdb_after_pg() -> bool {
-    true
 }
 
 fn default_backfill() -> bool {
