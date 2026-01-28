@@ -302,7 +302,8 @@ impl Replicator {
         pg_pool: &Pool,
         chain_id: u64,
     ) -> Result<i64> {
-        const BATCH_SIZE: i64 = 100;
+        // Use smaller batches to avoid OOM - high-tx blocks can have lots of logs
+        const BATCH_SIZE: i64 = 50;
 
         let duck_min = {
             let (min, _max) = duckdb.block_range().await?;
@@ -461,7 +462,8 @@ impl Replicator {
         gaps.sort_by(|a, b| b.0.cmp(&a.0));
 
         // Process gaps in smaller batches (100 blocks keeps memory usage low)
-        const BATCH_SIZE: i64 = 100;
+        // Use smaller batches to avoid OOM - high-tx blocks can have lots of logs
+        const BATCH_SIZE: i64 = 50;
         let mut total_synced = 0i64;
         let start_time = Instant::now();
 
@@ -772,6 +774,27 @@ impl Replicator {
 
         // Update cached status for fast status endpoint queries
         self.duckdb.update_cached_status(duck_max, gaps.clone(), internal_gap_blocks);
+
+        // Check for stale DuckDB data (DuckDB ahead of PostgreSQL)
+        // This shouldn't happen normally but can occur after reorgs or data issues
+        if duck_max > pg_max && pg_max > 0 {
+            let stale_blocks = duck_max - pg_max;
+            tracing::warn!(
+                chain_id = self.chain_id,
+                duck_max,
+                pg_max,
+                stale_blocks,
+                "DuckDB has stale blocks beyond PostgreSQL tip, cleaning up"
+            );
+            // Delete blocks from DuckDB that don't exist in PostgreSQL
+            if let Err(e) = self.duckdb.delete_blocks_from(pg_max + 1).await {
+                tracing::error!(
+                    chain_id = self.chain_id,
+                    error = %e,
+                    "Failed to clean up stale DuckDB blocks"
+                );
+            }
+        }
 
         // Log sync status
         if tip_lag > 10 {
