@@ -50,3 +50,7 @@ COPY --from=builder /build/tidx_abi.duckdb_extension /usr/share/duckdb/extension
 
 # Create init script to load extension
 COPY init-pg-duckdb.sql /docker-entrypoint-initdb.d/
+
+# Create data directory for Parquet files with proper permissions
+# This allows pg_duckdb to write Parquet files from COPY TO commands
+RUN mkdir -p /data && chown postgres:postgres /data && chmod 755 /data

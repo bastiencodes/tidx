@@ -21,5 +21,9 @@ SELECT duckdb.raw_query($$ LOAD '/usr/share/duckdb/extensions/tidx_abi.duckdb_ex
 -- Number of threads for DuckDB operations (default uses all cores)
 -- ALTER SYSTEM SET duckdb.threads = 8;
 
+-- Allow /data directory for Parquet file access (read and write)
+-- This is required for the hybrid PostgreSQL+Parquet query architecture
+SELECT duckdb.raw_query($$ SET allowed_directories TO ['/data'] $$);
+
 -- Note: pg_duckdb settings are applied per-session
 -- The indexer sets these via SET commands in execute_query_pg_duckdb()
