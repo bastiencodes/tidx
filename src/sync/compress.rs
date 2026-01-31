@@ -345,10 +345,11 @@ async fn export_logs_to_parquet(
 
     // Use DuckDB's postgres extension to connect back to PostgreSQL and export
     // This works because raw_query can use the postgres extension to access PG tables
+    // Note: We use ATTACH IF NOT EXISTS because pg_duckdb may reuse DuckDB contexts
     let duckdb_query = format!(
         "INSTALL postgres; \
          LOAD postgres; \
-         ATTACH '{}' AS pg (TYPE postgres, READ_ONLY); \
+         ATTACH IF NOT EXISTS '{}' AS pg (TYPE postgres, READ_ONLY); \
          COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
                topic0, topic1, topic2, topic3, data FROM pg.public.logs \
                WHERE block_num >= {} AND block_num <= {} \
