@@ -5,7 +5,8 @@ mod common;
 use common::testdb::TestDb;
 use tempfile::TempDir;
 
-/// Test that DuckDB COPY TO PARQUET works via pg_duckdb's raw_query
+/// Test that COPY TO PARQUET works via pg_duckdb
+/// pg_duckdb intercepts COPY commands with FORMAT 'parquet' and routes them through DuckDB
 #[tokio::test]
 async fn test_parquet_export_via_pg_duckdb() {
     let db = TestDb::new().await;
@@ -19,20 +20,35 @@ async fn test_parquet_export_via_pg_duckdb() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let parquet_path = temp_dir.path().join("test_logs.parquet");
     let path_str = parquet_path.to_string_lossy();
+    let escaped_path = path_str.replace('\'', "''");
 
     let conn = db.pool.get().await.expect("Failed to get connection");
 
-    // Use duckdb.raw_query() to execute DuckDB's native COPY command
-    let duckdb_query = format!(
+    // Try pg_duckdb's COPY TO syntax with parquet format
+    // This uses PostgreSQL's COPY syntax which pg_duckdb intercepts for parquet
+    let copy_sql = format!(
         "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
          topic0, topic1, topic2, topic3, data FROM logs \
-         ORDER BY block_num, log_idx LIMIT 100) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-        path_str
+         ORDER BY block_num, log_idx LIMIT 100) TO '{}' WITH (FORMAT 'parquet', COMPRESSION 'zstd')",
+        escaped_path
     );
 
-    let result = conn
-        .execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
-        .await;
+    let result = conn.execute(&copy_sql, &[]).await;
+
+    // If standard COPY fails, try raw_query fallback
+    let result: Result<(), _> = match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            println!("Standard COPY failed: {}, trying raw_query fallback", e);
+            let duckdb_query = format!(
+                "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
+                 topic0, topic1, topic2, topic3, data FROM logs \
+                 ORDER BY block_num, log_idx LIMIT 100) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+                escaped_path
+            );
+            conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query]).await.map(|_| ())
+        }
+    };
 
     match result {
         Ok(_) => {
@@ -65,7 +81,7 @@ async fn test_parquet_export_via_pg_duckdb() {
             }
         }
         Err(e) => {
-            println!("duckdb.raw_query COPY failed: {}", e);
+            println!("Parquet export failed: {}", e);
             println!("This test requires pg_duckdb extension to be installed");
         }
     }
@@ -113,21 +129,36 @@ async fn test_compress_tick() {
     let chain_dir = temp_dir.path().join("1");
     std::fs::create_dir_all(&chain_dir).expect("Failed to create chain dir");
 
-    // Test duckdb.raw_query() COPY syntax (tick_compress is private)
+    // Test COPY syntax with parquet format (tick_compress is private)
     let parquet_path = chain_dir.join("logs_1_10.parquet");
     let path_str = parquet_path.to_string_lossy();
+    let escaped_path = path_str.replace('\'', "''");
 
-    let duckdb_query = format!(
+    // Try pg_duckdb's COPY TO syntax first
+    let copy_sql = format!(
         "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
          topic0, topic1, topic2, topic3, data FROM logs \
          WHERE block_num >= 1 AND block_num <= 10 \
-         ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-        path_str
+         ORDER BY block_num, log_idx) TO '{}' WITH (FORMAT 'parquet', COMPRESSION 'zstd')",
+        escaped_path
     );
 
-    let result = conn
-        .execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
-        .await;
+    let result = conn.execute(&copy_sql, &[]).await;
+
+    // Fallback to raw_query if standard COPY fails
+    let result: Result<(), _> = match result {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let duckdb_query = format!(
+                "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
+                 topic0, topic1, topic2, topic3, data FROM logs \
+                 WHERE block_num >= 1 AND block_num <= 10 \
+                 ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+                escaped_path
+            );
+            conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query]).await.map(|_| ())
+        }
+    };
 
     match result {
         Ok(_) => {

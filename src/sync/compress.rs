@@ -319,6 +319,9 @@ async fn find_contiguous_range(
 }
 
 /// Export logs from PostgreSQL to Parquet using DuckDB's COPY (via pg_duckdb)
+///
+/// pg_duckdb intercepts PostgreSQL's COPY command when the format is 'parquet'
+/// and routes it through DuckDB, which can write Parquet files directly.
 async fn export_logs_to_parquet(
     pool: &Pool,
     start_block: u64,
@@ -328,18 +331,52 @@ async fn export_logs_to_parquet(
     let conn = pool.get().await?;
     let path_str = file_path.to_string_lossy();
 
-    // Use duckdb.raw_query() to execute DuckDB's native COPY command
-    // This bypasses PostgreSQL's COPY parser which doesn't support Parquet
-    let duckdb_query = format!(
+    // Escape single quotes in path for SQL
+    let escaped_path = path_str.replace('\'', "''");
+
+    // Use pg_duckdb's COPY TO syntax with parquet format
+    // pg_duckdb intercepts COPY commands with FORMAT 'parquet' and routes them through DuckDB
+    // The WITH (...) syntax is PostgreSQL-standard and works with pg_duckdb
+    let copy_sql = format!(
         "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
          topic0, topic1, topic2, topic3, data FROM logs \
          WHERE block_num >= {} AND block_num <= {} \
-         ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
-        start_block, end_block, path_str
+         ORDER BY block_num, log_idx) TO '{}' WITH (FORMAT 'parquet', COMPRESSION 'zstd')",
+        start_block, end_block, escaped_path
     );
 
-    conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
-        .await?;
+    // Try the standard COPY approach first (works when pg_duckdb intercepts it)
+    match conn.execute(&copy_sql, &[]).await {
+        Ok(_) => {
+            debug!(path = %path_str, "COPY TO parquet succeeded");
+        }
+        Err(e) => {
+            // If standard COPY fails (e.g., PostgreSQL doesn't recognize parquet format),
+            // fall back to using duckdb.raw_query() with explicit table reference
+            debug!(error = %e, "Standard COPY failed, trying raw_query fallback");
+
+            // Use duckdb.raw_query() to execute DuckDB's native COPY command
+            // DuckDB inside pg_duckdb can see PostgreSQL tables when accessed this way
+            let duckdb_query = format!(
+                "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
+                 topic0, topic1, topic2, topic3, data FROM logs \
+                 WHERE block_num >= {} AND block_num <= {} \
+                 ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+                start_block, end_block, escaped_path
+            );
+
+            conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
+                .await
+                .map_err(|e2| {
+                    error!(
+                        original_error = %e,
+                        raw_query_error = %e2,
+                        "Both COPY and raw_query failed for Parquet export"
+                    );
+                    e2
+                })?;
+        }
+    }
 
     // Get file size and row count from parquet metadata
     let file_size = std::fs::metadata(file_path)
