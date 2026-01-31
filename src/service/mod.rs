@@ -181,9 +181,11 @@ pub async fn execute_query_with_parquet(
     };
 
     // Check if we should use Parquet sources
-    let use_parquet = parquet_config
-        .map(|c| c.enabled && c.max_parquet_block.is_some())
-        .unwrap_or(false);
+    // Only use parquet with DuckDB engine (read_parquet is a DuckDB function)
+    let use_parquet = use_pg_duckdb
+        && parquet_config
+            .map(|c| c.enabled && c.max_parquet_block.is_some())
+            .unwrap_or(false);
 
     // Generate CTE SQL if a signature is provided
     let sql = if let Some(sig_str) = signature {
