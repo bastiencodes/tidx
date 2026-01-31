@@ -328,31 +328,40 @@ async fn export_logs_to_parquet(
     let conn = pool.get().await?;
     let path_str = file_path.to_string_lossy();
 
-    // Use DuckDB's COPY syntax (not PostgreSQL's) via pg_duckdb
-    // DuckDB syntax: COPY (...) TO 'path' (FORMAT PARQUET, COMPRESSION ZSTD)
-    let row_count = conn
-        .execute(
-            &format!(
-                r#"
-                COPY (
-                    SELECT block_num, tx_idx, log_idx, tx_hash, address,
-                           topic0, topic1, topic2, topic3, data
-                    FROM logs 
-                    WHERE block_num >= {} AND block_num <= {}
-                    ORDER BY block_num, log_idx
-                ) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)
-                "#,
-                start_block, end_block, path_str
-            ),
-            &[],
-        )
+    // Use duckdb.raw_query() to execute DuckDB's native COPY command
+    // This bypasses PostgreSQL's COPY parser which doesn't support Parquet
+    let duckdb_query = format!(
+        "COPY (SELECT block_num, tx_idx, log_idx, tx_hash, address, \
+         topic0, topic1, topic2, topic3, data FROM logs \
+         WHERE block_num >= {} AND block_num <= {} \
+         ORDER BY block_num, log_idx) TO '{}' (FORMAT PARQUET, COMPRESSION ZSTD)",
+        start_block, end_block, path_str
+    );
+
+    conn.execute("SELECT duckdb.raw_query($1)", &[&duckdb_query])
         .await?;
 
+    // Get file size and row count from parquet metadata
     let file_size = std::fs::metadata(file_path)
         .map(|m| m.len())
         .unwrap_or(0);
 
+    // Read row count from parquet file footer (avoids extra COUNT query)
+    let row_count = read_parquet_row_count(file_path).unwrap_or(0);
+
     Ok((row_count, file_size))
+}
+
+/// Read row count from parquet file metadata (footer)
+fn read_parquet_row_count(file_path: &PathBuf) -> Result<u64> {
+    use parquet::file::reader::FileReader;
+    use parquet::file::serialized_reader::SerializedFileReader;
+    use std::fs::File;
+
+    let file = File::open(file_path)?;
+    let reader = SerializedFileReader::new(file)?;
+    let metadata = reader.metadata();
+    Ok(metadata.file_metadata().num_rows() as u64)
 }
 
 /// Record the exported range in the tracking table
