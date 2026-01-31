@@ -66,15 +66,31 @@ pub async fn run_compress_loop(
             biased;
 
             _ = shutdown.recv() => {
-                info!("Parquet compression: shutting down");
+                info!("Parquet export: shutting down");
                 break;
             }
 
-            _ = tokio::time::sleep(interval) => {
-                if let Err(e) = tick_compress(&pool, chain_id, &config, &chain_dir).await {
-                    error!(error = %e, chain_id = chain_id, "Parquet compression tick failed");
+            _ = async {
+                // Export continuously until caught up, then wait for interval
+                loop {
+                    match tick_compress(&pool, chain_id, &config, &chain_dir).await {
+                        Ok(true) => {
+                            // Exported a batch, immediately try next batch
+                            tokio::task::yield_now().await;
+                        }
+                        Ok(false) => {
+                            // No more blocks to export, wait for new blocks
+                            tokio::time::sleep(interval).await;
+                            break;
+                        }
+                        Err(e) => {
+                            error!(error = %e, chain_id = chain_id, "Parquet export tick failed");
+                            tokio::time::sleep(interval).await;
+                            break;
+                        }
+                    }
                 }
-            }
+            } => {}
         }
     }
 
@@ -116,12 +132,13 @@ async fn create_parquet_ranges_table(pool: &Pool) -> Result<()> {
 }
 
 /// Check for exportable ranges and export to Parquet
+/// Returns true if a batch was exported, false if nothing to export
 async fn tick_compress(
     pool: &Pool,
     chain_id: u64,
     config: &ParquetExportConfig,
     data_dir: &PathBuf,
-) -> Result<()> {
+) -> Result<bool> {
     let conn = pool.get().await?;
 
     // Get current tip (highest synced block)
@@ -135,8 +152,8 @@ async fn tick_compress(
     let tip_num: i64 = match tip_row {
         Some(row) => row.get(0),
         None => {
-            debug!(chain_id = chain_id, "No sync state found, skipping compression");
-            return Ok(());
+            debug!(chain_id = chain_id, "No sync state found, skipping export");
+            return Ok(false);
         }
     };
 
@@ -155,13 +172,13 @@ async fn tick_compress(
                 end = e,
                 blocks = e - s + 1,
                 threshold = config.threshold_blocks,
-                "Range too small for compression"
+                "Range too small for export"
             );
-            return Ok(());
+            return Ok(false);
         }
         None => {
-            debug!(chain_id = chain_id, "No contiguous range found for compression");
-            return Ok(());
+            debug!(chain_id = chain_id, "No contiguous range found for export");
+            return Ok(false);
         }
     };
 
@@ -200,7 +217,7 @@ async fn tick_compress(
         "Parquet export complete"
     );
 
-    Ok(())
+    Ok(true)
 }
 
 /// Get the highest block number already exported to Parquet
