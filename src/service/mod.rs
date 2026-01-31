@@ -215,18 +215,72 @@ pub async fn execute_query_with_parquet(
         sql
     };
 
-    // Execute with appropriate backend
-    if use_pg_duckdb {
-        execute_query_pg_duckdb(
-            pg_pool,
-            &sql,
-            options,
-            pg_duckdb_config.memory_limit.as_deref(),
-            pg_duckdb_config.threads,
+    // Execute with appropriate backend, with fallback on error
+    let (primary_result, primary_engine, fallback_engine) = if use_pg_duckdb {
+        (
+            execute_query_pg_duckdb(
+                pg_pool,
+                &sql,
+                options,
+                pg_duckdb_config.memory_limit.as_deref(),
+                pg_duckdb_config.threads,
+            )
+            .await,
+            "duckdb",
+            "postgres",
         )
-        .await
     } else {
-        execute_query_postgres(pg_pool, &sql, options).await
+        (
+            execute_query_postgres(pg_pool, &sql, options).await,
+            "postgres",
+            "duckdb",
+        )
+    };
+
+    // If primary engine failed, try fallback (unless engine was explicitly forced)
+    match primary_result {
+        Ok(result) => Ok(result),
+        Err(primary_err) if force_engine.is_none() => {
+            tracing::warn!(
+                primary_engine = primary_engine,
+                fallback_engine = fallback_engine,
+                error = %primary_err,
+                "Query failed, trying fallback engine"
+            );
+
+            let fallback_result = if fallback_engine == "duckdb" {
+                execute_query_pg_duckdb(
+                    pg_pool,
+                    &sql,
+                    options,
+                    pg_duckdb_config.memory_limit.as_deref(),
+                    pg_duckdb_config.threads,
+                )
+                .await
+            } else {
+                execute_query_postgres(pg_pool, &sql, options).await
+            };
+
+            match fallback_result {
+                Ok(mut result) => {
+                    // Mark that we used the fallback engine
+                    result.engine = Some(format!("{} (fallback)", fallback_engine));
+                    Ok(result)
+                }
+                Err(fallback_err) => {
+                    // Both failed, return the primary error
+                    tracing::error!(
+                        primary_engine = primary_engine,
+                        fallback_engine = fallback_engine,
+                        primary_error = %primary_err,
+                        fallback_error = %fallback_err,
+                        "Both engines failed"
+                    );
+                    Err(primary_err)
+                }
+            }
+        }
+        Err(err) => Err(err), // Engine was forced, don't fallback
     }
 }
 
