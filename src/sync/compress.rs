@@ -486,8 +486,7 @@ async fn export_table_to_parquet(
 fn get_table_select_query_native(table_type: TableType, start_block: u64, end_block: u64) -> String {
     match table_type {
         TableType::Blocks => format!(
-            "SELECT num, hash, parent_hash, timestamp, gas_limit, gas_used, base_fee_per_gas, \
-             withdrawals_root, blob_gas_used, excess_blob_gas \
+            "SELECT num, hash, parent_hash, timestamp, timestamp_ms, gas_limit, gas_used, miner, extra_data \
              FROM blocks WHERE num >= {} AND num <= {} ORDER BY num",
             start_block, end_block
         ),
