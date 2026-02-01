@@ -559,12 +559,12 @@ pub async fn get_parquet_ranges(pool: &Pool, chain_id: u64) -> Result<Vec<Parque
         .collect())
 }
 
-/// Get the maximum block number stored in Parquet (for query routing)
+/// Get the maximum block number stored in Parquet for logs (for query routing)
 pub async fn get_max_parquet_block(pool: &Pool, chain_id: u64) -> Result<Option<u64>> {
     let conn = pool.get().await?;
     let row = conn
         .query_opt(
-            "SELECT MAX(end_block) FROM parquet_ranges WHERE chain_id = $1",
+            "SELECT MAX(end_block) FROM parquet_ranges WHERE chain_id = $1 AND table_type = 'logs'",
             &[&(chain_id as i64)],
         )
         .await?;
