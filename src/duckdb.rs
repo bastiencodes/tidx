@@ -464,13 +464,9 @@ impl VScalar for AbiBool {
                 continue;
             }
 
+            // Bool is true if last byte is non-zero (matches standard ABI behavior)
             let word = &blob_data[offset..offset + 32];
-            let is_valid = word[0..31].iter().all(|&b| b == 0) && (word[31] == 0 || word[31] == 1);
-            if is_valid {
-                values.push((i, word[31] == 1));
-            } else {
-                null_indices.push(i);
-            }
+            values.push((i, word[31] != 0));
         }
 
         for idx in null_indices {
