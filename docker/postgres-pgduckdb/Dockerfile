@@ -97,4 +97,6 @@ COPY --from=parquet-builder /usr/lib/postgresql/16/lib/pg_parquet.so /usr/lib/po
 COPY init-pg-duckdb.sql /docker-entrypoint-initdb.d/
 
 # Create data directory for Parquet files with proper permissions
+USER root
 RUN mkdir -p /data && chown postgres:postgres /data && chmod 755 /data
+USER postgres
