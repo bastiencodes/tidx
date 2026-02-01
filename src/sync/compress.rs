@@ -161,21 +161,31 @@ async fn update_staging(
     }
 
     let staging_path = data_dir.join(format!("{}_staging.parquet", table_type.as_str()));
+    let tmp_path = data_dir.join(format!(".{}_staging.tmp.parquet", table_type.as_str()));
     
-    // Export staging file (overwrites previous)
-    match export_table_to_parquet(pool, table_type, start_block, tip_num, &staging_path).await {
+    // Export to temp file first, then atomically rename to avoid partial reads
+    match export_table_to_parquet(pool, table_type, start_block, tip_num, &tmp_path).await {
         Ok((row_count, _)) => {
-            debug!(
-                chain_id = chain_id,
-                table = table_type.as_str(),
-                start = start_block,
-                end = tip_num,
-                row_count = row_count,
-                "Updated staging parquet"
-            );
+            // Atomically rename temp file to staging file
+            if let Err(e) = std::fs::rename(&tmp_path, &staging_path) {
+                debug!(error = %e, chain_id = chain_id, "Failed to rename staging file");
+                // Clean up temp file on failure
+                let _ = std::fs::remove_file(&tmp_path);
+            } else {
+                debug!(
+                    chain_id = chain_id,
+                    table = table_type.as_str(),
+                    start = start_block,
+                    end = tip_num,
+                    row_count = row_count,
+                    "Updated staging parquet"
+                );
+            }
         }
         Err(e) => {
             debug!(error = %e, chain_id = chain_id, "Staging export failed");
+            // Clean up temp file on failure
+            let _ = std::fs::remove_file(&tmp_path);
         }
     }
 
