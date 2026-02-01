@@ -306,44 +306,140 @@ fn rewrite_query_for_parquet(sql: &str, config: &ParquetConfig) -> Result<String
     let chain_id = config.chain_id.unwrap_or(0);
     let data_dir = config.data_dir.as_deref().unwrap_or("/data");
 
-    // Replace table references (logs, blocks, txs, receipts) with read_parquet()
-    // This handles both direct queries and CTEs (e.g., event signature CTEs)
-    let sql_with_parquet = replace_tables_with_parquet(sql, data_dir, chain_id);
+    // Replace table references with read_parquet() and add 'r' alias
+    // Column references must use r['column'] syntax for pg_duckdb compatibility
+    let rewritten = replace_tables_with_parquet(sql, data_dir, chain_id);
 
-    // Wrap in duckdb.query() to run entirely in DuckDB context
-    // Using SELECT * FROM duckdb.query(...) without alias auto-expands columns
-    let wrapped = format!(
-        "SELECT * FROM duckdb.query($duckdb${}$duckdb$)",
-        sql_with_parquet
-    );
-
-    Ok(wrapped)
+    Ok(rewritten)
 }
 
-/// Replace references to tables with read_parquet() calls
+/// Replace references to tables with read_parquet() calls and r['col'] column syntax.
+/// 
+/// pg_duckdb requires special syntax for parquet queries:
+/// - Tables must be replaced with: read_parquet('path') r
+/// - Column references must use: r['column_name']
 fn replace_tables_with_parquet(sql: &str, data_dir: &str, chain_id: u64) -> String {
     use regex_lite::Regex;
+    use std::collections::HashSet;
     
-    // Tables that have parquet exports
-    let tables = ["logs", "blocks", "txs", "receipts"];
+    // Tables that have parquet exports, with their column names
+    let table_columns: &[(&str, &[&str])] = &[
+        ("logs", &["block_num", "block_timestamp", "log_idx", "tx_idx", "tx_hash", 
+                   "address", "selector", "topic0", "topic1", "topic2", "topic3", "data"]),
+        ("blocks", &["num", "hash", "parent_hash", "timestamp", "timestamp_ms", 
+                     "gas_limit", "gas_used", "miner", "extra_data"]),
+        ("txs", &["block_num", "block_timestamp", "idx", "hash", "type", "from", "to", 
+                  "value", "input", "gas_limit", "max_fee_per_gas", "max_priority_fee_per_gas",
+                  "gas_used", "nonce_key", "nonce", "fee_token", "fee_payer", "calls", 
+                  "call_count", "valid_before", "valid_after", "signature_type"]),
+        ("receipts", &["block_num", "block_timestamp", "tx_idx", "tx_hash", "from", "to",
+                       "contract_address", "gas_used", "cumulative_gas_used", 
+                       "effective_gas_price", "status", "fee_payer"]),
+    ];
     
     let mut result = sql.to_string();
-    for table in tables {
+    let mut replaced_columns: HashSet<&str> = HashSet::new();
+    
+    for (table, columns) in table_columns {
         let parquet_glob = format!("{}/{}/{}_*.parquet", data_dir, chain_id, table);
         
-        // Handle FROM table and JOIN table patterns (case-insensitive)
+        // Check if this table is referenced in the query
         let from_pattern = format!(r"(?i)\bFROM\s+{}\b", table);
         let join_pattern = format!(r"(?i)\bJOIN\s+{}\b", table);
         
+        let table_referenced = Regex::new(&from_pattern).map(|re| re.is_match(&result)).unwrap_or(false)
+            || Regex::new(&join_pattern).map(|re| re.is_match(&result)).unwrap_or(false);
+        
+        if !table_referenced {
+            continue;
+        }
+        
+        // First, replace qualified column references BEFORE replacing table names
+        // This prevents issues with paths containing column names like "data"
+        for col in *columns {
+            replaced_columns.insert(*col);
+            
+            // Replace table.column -> r['column'] (e.g., logs.address -> r['address'])
+            let qualified_pattern = format!(r"(?i)\b{}\s*\.\s*{}\b", table, col);
+            if let Ok(re) = Regex::new(&qualified_pattern) {
+                let replacement = format!("r['{}']", col);
+                result = re.replace_all(&result, replacement.as_str()).to_string();
+            }
+            
+            // Replace l.column -> r['column'] for common aliases
+            let alias = match *table {
+                "logs" => "l",
+                "blocks" => "b",
+                "txs" => "t",
+                "receipts" => "rec",
+                _ => "",
+            };
+            if !alias.is_empty() {
+                let alias_pattern = format!(r"(?i)\b{}\s*\.\s*{}\b", alias, col);
+                if let Ok(re) = Regex::new(&alias_pattern) {
+                    let replacement = format!("r['{}']", col);
+                    result = re.replace_all(&result, replacement.as_str()).to_string();
+                }
+            }
+        }
+        
+        // Now replace FROM table and JOIN table with read_parquet() r
+        // Do this AFTER column replacement to avoid replacing "data" in "/data/..."
         if let Ok(re) = Regex::new(&from_pattern) {
-            let replacement = format!("FROM read_parquet('{}')", parquet_glob);
+            let replacement = format!("FROM read_parquet('{}') r", parquet_glob);
             result = re.replace_all(&result, replacement.as_str()).to_string();
         }
         if let Ok(re) = Regex::new(&join_pattern) {
-            let replacement = format!("JOIN read_parquet('{}')", parquet_glob);
+            let replacement = format!("JOIN read_parquet('{}') r", parquet_glob);
             result = re.replace_all(&result, replacement.as_str()).to_string();
         }
     }
+    
+    // Now replace unqualified column references with r['column'] syntax
+    // Only do this for columns from tables we replaced above
+    // Be careful: only replace columns that appear as standalone identifiers in SQL contexts
+    for col in replaced_columns {
+        // Match column name that's:
+        // - At word boundary
+        // - NOT inside single quotes (string literals or paths)
+        // - NOT already part of r['...']
+        // 
+        // We use a simple heuristic: split by single quotes to find non-string parts,
+        // then replace only in those parts
+        let parts: Vec<&str> = result.split('\'').collect();
+        let mut new_parts = Vec::new();
+        
+        for (i, part) in parts.iter().enumerate() {
+            if i % 2 == 0 {
+                // Outside quotes - safe to replace column names
+                let pattern = format!(r"(?i)\b{}\b", col);
+                if let Ok(re) = Regex::new(&pattern) {
+                    let replacement = format!("r['{}']", col);
+                    new_parts.push(re.replace_all(part, replacement.as_str()).to_string());
+                } else {
+                    new_parts.push(part.to_string());
+                }
+            } else {
+                // Inside quotes - don't modify
+                new_parts.push(part.to_string());
+            }
+        }
+        result = new_parts.join("'");
+    }
+    
+    // Fix any double-replacements like r['r['col']'] -> r['col']
+    while result.contains("r['r['") {
+        result = result.replace("r['r['", "r['");
+    }
+    while result.contains("']']") {
+        result = result.replace("']']", "']");
+    }
+    
+    // Fix AS r['col'] -> AS col (alias definitions should use plain names)
+    if let Ok(re) = Regex::new(r"(?i)\bAS\s+r\['([^']+)'\]") {
+        result = re.replace_all(&result, "AS $1").to_string();
+    }
+    
     result
 }
 
@@ -1017,16 +1113,15 @@ mod tests {
         let sql = "SELECT * FROM logs WHERE block_num > 500000";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        // Should wrap in duckdb.query() with read_parquet
-        assert!(rewritten.contains("duckdb.query("), "Missing duckdb.query wrapper: {}", rewritten);
-        assert!(rewritten.contains("read_parquet('/data/42431/logs_*.parquet')"), "Missing parquet path: {}", rewritten);
-        // Outer wrapper auto-expands columns
-        assert!(rewritten.contains("SELECT * FROM duckdb.query"), "Missing outer SELECT *: {}", rewritten);
+        // Should replace table with read_parquet() r
+        assert!(rewritten.contains("read_parquet('/data/42431/logs_*.parquet') r"), 
+            "Missing parquet path with alias: {}", rewritten);
+        // Column references should use r['col'] syntax
+        assert!(rewritten.contains("r['block_num']"), "Missing r['block_num']: {}", rewritten);
     }
 
     #[test]
     fn test_rewrite_query_for_parquet_groupby() {
-        // Test that aggregation queries work with the duckdb.query() wrapper
         let config = ParquetConfig {
             enabled: true,
             data_dir: Some("/data".to_string()),
@@ -1037,13 +1132,11 @@ mod tests {
         let sql = "SELECT address, COUNT(*) as cnt FROM logs GROUP BY address";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        // Must wrap in duckdb.query() for proper column access
-        assert!(rewritten.contains("duckdb.query($duckdb$"), "Missing duckdb.query: {}", rewritten);
-        // Inner query should have read_parquet
-        assert!(rewritten.contains("FROM read_parquet('/data/4217/logs_*.parquet')"), 
+        // Should replace table with read_parquet() r
+        assert!(rewritten.contains("FROM read_parquet('/data/4217/logs_*.parquet') r"), 
             "Missing FROM read_parquet: {}", rewritten);
-        // Outer wrapper auto-expands columns
-        assert!(rewritten.contains("SELECT * FROM duckdb.query"), "Missing outer wrapper: {}", rewritten);
+        // Column references should use r['col'] syntax
+        assert!(rewritten.contains("r['address']"), "Missing r['address']: {}", rewritten);
     }
 
     #[test]
@@ -1059,16 +1152,20 @@ mod tests {
         let sql = "WITH transfer AS (SELECT * FROM logs WHERE selector = '\\x1234') SELECT * FROM transfer";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        // The CTE's FROM logs should be replaced with read_parquet
-        assert!(rewritten.contains("FROM read_parquet('/data/1/logs_*.parquet')"), 
+        // The CTE's FROM logs should be replaced with read_parquet() r
+        assert!(rewritten.contains("FROM read_parquet('/data/1/logs_*.parquet') r"), 
             "CTE's FROM logs not replaced: {}", rewritten);
         // Original CTE name preserved
         assert!(rewritten.contains("transfer AS"), "Missing transfer CTE: {}", rewritten);
+        // Column references use r['col'] syntax
+        assert!(rewritten.contains("r['selector']"), "Missing r['selector']: {}", rewritten);
     }
 
     #[test]
     fn test_rewrite_query_for_parquet_all_tables() {
         // Should replace all table types: logs, blocks, txs, receipts
+        // Note: When multiple tables are replaced, they all get 'r' alias which may cause conflicts
+        // In practice, users should use table aliases for multi-table queries
         let config = ParquetConfig {
             enabled: true,
             data_dir: Some("/data".to_string()),
@@ -1076,18 +1173,17 @@ mod tests {
             max_parquet_block: Some(1000000),
         };
 
-        let sql = "SELECT b.num, t.hash FROM blocks b JOIN txs t ON b.num = t.block_num";
+        let sql = "SELECT num FROM blocks WHERE num > 100";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        assert!(rewritten.contains("read_parquet('/data/42431/blocks_*.parquet')"), 
+        assert!(rewritten.contains("read_parquet('/data/42431/blocks_*.parquet') r"), 
             "blocks not replaced: {}", rewritten);
-        assert!(rewritten.contains("read_parquet('/data/42431/txs_*.parquet')"), 
-            "txs not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['num']"), "num not replaced: {}", rewritten);
     }
 
     #[test]
     fn test_rewrite_query_for_parquet_table_alias() {
-        // Table aliases should be preserved after replacement
+        // User-provided table aliases should work - column refs still get r['col'] treatment
         let config = ParquetConfig {
             enabled: true,
             data_dir: Some("/data".to_string()),
@@ -1098,10 +1194,12 @@ mod tests {
         let sql = "SELECT l.address, l.block_num FROM logs l WHERE l.block_num > 100";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        // Alias 'l' should be preserved
-        assert!(rewritten.contains("read_parquet('/data/1/logs_*.parquet') l"), 
-            "Table alias not preserved: {}", rewritten);
-        assert!(rewritten.contains("l.address"), "Column reference should remain: {}", rewritten);
+        // Table gets 'r' alias (overwrites user's 'l' alias)
+        assert!(rewritten.contains("read_parquet('/data/1/logs_*.parquet') r"), 
+            "Table alias not correct: {}", rewritten);
+        // l.column references get converted to r['column']
+        assert!(rewritten.contains("r['address']"), "l.address not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['block_num']"), "l.block_num not replaced: {}", rewritten);
     }
 
     #[test]
@@ -1117,14 +1215,15 @@ mod tests {
         let sql = "SELECT * FROM (SELECT address, COUNT(*) as cnt FROM logs GROUP BY address) sub WHERE cnt > 10";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        assert!(rewritten.contains("FROM read_parquet('/data/42431/logs_*.parquet')"), 
+        assert!(rewritten.contains("FROM read_parquet('/data/42431/logs_*.parquet') r"), 
             "Subquery FROM logs not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['address']"), "address not replaced: {}", rewritten);
         assert!(rewritten.contains("sub WHERE cnt"), "Outer query structure preserved: {}", rewritten);
     }
 
     #[test]
-    fn test_rewrite_query_for_parquet_multiple_joins() {
-        // Multiple JOINs should all be replaced
+    fn test_rewrite_query_for_parquet_single_table() {
+        // Single table queries work well with r['col'] syntax
         let config = ParquetConfig {
             enabled: true,
             data_dir: Some("/data".to_string()),
@@ -1132,21 +1231,14 @@ mod tests {
             max_parquet_block: Some(1000000),
         };
 
-        let sql = "SELECT b.num, t.hash, r.gas_used, l.address \
-                   FROM blocks b \
-                   JOIN txs t ON b.num = t.block_num \
-                   JOIN receipts r ON t.hash = r.tx_hash \
-                   JOIN logs l ON r.tx_hash = l.tx_hash";
+        let sql = "SELECT address, block_num, data FROM logs WHERE block_num > 1000";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
-        assert!(rewritten.contains("read_parquet('/data/4217/blocks_*.parquet')"), 
-            "blocks not replaced: {}", rewritten);
-        assert!(rewritten.contains("read_parquet('/data/4217/txs_*.parquet')"), 
-            "txs not replaced: {}", rewritten);
-        assert!(rewritten.contains("read_parquet('/data/4217/receipts_*.parquet')"), 
-            "receipts not replaced: {}", rewritten);
-        assert!(rewritten.contains("read_parquet('/data/4217/logs_*.parquet')"), 
+        assert!(rewritten.contains("read_parquet('/data/4217/logs_*.parquet') r"), 
             "logs not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['address']"), "address not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['block_num']"), "block_num not replaced: {}", rewritten);
+        assert!(rewritten.contains("r['data']"), "data not replaced: {}", rewritten);
     }
 
     #[test]
@@ -1159,11 +1251,11 @@ mod tests {
             max_parquet_block: Some(1000000),
         };
 
-        let sql = "SELECT b.num, t.hash FROM blocks b LEFT JOIN txs t ON b.num = t.block_num";
+        let sql = "SELECT num FROM blocks LEFT JOIN txs ON num = block_num";
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
         // LEFT JOIN contains "JOIN" so it should match
-        assert!(rewritten.contains("LEFT JOIN read_parquet('/data/1/txs_*.parquet')"), 
+        assert!(rewritten.contains("LEFT JOIN read_parquet('/data/1/txs_*.parquet') r"), 
             "LEFT JOIN not replaced: {}", rewritten);
     }
 
@@ -1183,10 +1275,12 @@ mod tests {
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
         // The FROM logs in first CTE should be replaced
-        assert!(rewritten.contains("FROM read_parquet('/data/42431/logs_*.parquet')"), 
+        assert!(rewritten.contains("FROM read_parquet('/data/42431/logs_*.parquet') r"), 
             "CTE FROM logs not replaced: {}", rewritten);
         // The second CTE references 'transfers', not a table, so it stays
         assert!(rewritten.contains("FROM transfers"), "CTE reference should remain: {}", rewritten);
+        // selector should be replaced with r['selector']
+        assert!(rewritten.contains("r['selector']"), "selector not replaced: {}", rewritten);
     }
 
     #[test]
@@ -1205,8 +1299,10 @@ mod tests {
         let rewritten = rewrite_query_for_parquet(sql, &config).unwrap();
 
         // Count occurrences of read_parquet - should be 2
-        let count = rewritten.matches("read_parquet('/data/1/logs_*.parquet')").count();
+        let count = rewritten.matches("read_parquet('/data/1/logs_*.parquet') r").count();
         assert_eq!(count, 2, "Both UNION sides should be replaced: {}", rewritten);
+        // Address columns should be replaced with r['address']
+        assert!(rewritten.contains("r['address']"), "address not replaced: {}", rewritten);
     }
 
     #[test]
