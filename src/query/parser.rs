@@ -118,7 +118,9 @@ impl EventSignature {
 
         format!(
             r#"{name} AS (
-    SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address{select_clause}
+    SELECT block_num, block_timestamp, log_idx, tx_idx, 
+           '0x' || lower(hex(tx_hash)) AS tx_hash,
+           '0x' || lower(hex(address)) AS address{select_clause}
     FROM logs
     WHERE selector = unhex('{topic0}')
 )"#,
