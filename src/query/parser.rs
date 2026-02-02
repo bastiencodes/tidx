@@ -120,7 +120,7 @@ impl EventSignature {
             r#"{name} AS (
     SELECT block_num, block_timestamp, log_idx, tx_idx, tx_hash, address{select_clause}
     FROM logs
-    WHERE selector = '0x{topic0}'
+    WHERE selector = unhex('{topic0}')
 )"#,
             name = self.name.to_lowercase(),
             select_clause = select_clause,
@@ -567,8 +567,8 @@ mod tests {
         assert!(cte.contains("abi_address(topic1)"));
         assert!(cte.contains("abi_address(topic2)"));
         assert!(cte.contains("abi_uint(data, 0)"));
-        // DuckDB uses '0x...' format and filters by full 32-byte selector (topic0)
-        assert!(cte.contains("selector = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'"));
+        // DuckDB uses unhex() to convert hex string to BLOB for selector comparison
+        assert!(cte.contains("selector = unhex('ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef')"));
     }
 
     #[test]
