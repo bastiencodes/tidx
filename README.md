@@ -21,7 +21,6 @@
 
 ## Features
 
-- **Hybrid Query Routing** — Automatic routing to ClickHouse for analytics, PostgreSQL for point lookups
 - **Dual Storage** — PostgreSQL for OLTP + ClickHouse columnar for OLAP
 - **Real-time Replication** — ClickHouse syncs via MaterializedPostgreSQL (WAL streaming)
 - **Event/Function Decoding** — Query decoded events or function calldata by ABI signature (no pre-registration)
@@ -31,12 +30,10 @@
 
 - [Quickstart](#quickstart)
 - [Overview](#overview)
-- [Query Routing](#query-routing)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [HTTP API](#http-api)
-- [Query Cookbook](#query-cookbook)
 - [Database Schema](#database-schema)
 - [Sync Architecture](#sync-architecture)
 - [Development](#development)
@@ -50,28 +47,21 @@ curl -L https://tidx.vercel.app/docker | bash
 
 ## Overview
 
-tidx uses a hybrid PostgreSQL + ClickHouse architecture that automatically routes queries to the optimal engine:
+tidx uses a hybrid PostgreSQL + ClickHouse architecture. Use the `engine` parameter to choose:
 
 ```
-                           ┌─────────────────┐
-                           │   tidx Router   │
-                           └────────┬────────┘
-                                    │
-         ┌──────────────────────────┴──────────────────────────┐
-         │                                                     │
-         │ WHERE hash = '0x...'                 GROUP BY date  │
-         │ WHERE block_num = 123                COUNT(*), SUM()│
-         ▼                                                     ▼
 ┌─────────────────────┐                         ┌─────────────────────┐
 │    PostgreSQL       │       WAL stream        │     ClickHouse      │
 │    (OLTP)           │ ─────────────────────►  │      (OLAP)         │
-└─────────────────────┘   MaterializedPG        └─────────────────────┘
+│                     │   MaterializedPG        │                     │
+│  engine=postgres    │                         │  engine=clickhouse  │
+└─────────────────────┘                         └─────────────────────┘
 ```
 
 | Engine | Use Case | Example |
 |--------|----------|---------|
-| **PostgreSQL** | Point lookups, recent data | `WHERE hash = '0x...'` |
-| **ClickHouse** | Aggregations, scans, analytics | `GROUP BY`, `COUNT(*)`, `SUM()` |
+| `postgres` (default) | Point lookups, real-time streaming | `WHERE hash = '0x...'` |
+| `clickhouse` | Aggregations, scans, analytics | `GROUP BY`, `COUNT(*)`, `SUM()` |
 
 ## Installation
 
@@ -279,15 +269,19 @@ curl http://localhost:8080/status
 ### Reference
 
 ```
-GET /health                                              Health check
-GET /status                                              Sync status for all chains
-GET /query                                               Execute SQL query (auto-routed)
-    ?sql                    string    (required)         SQL query (SELECT only)
-    ?chainId                number    (required)         Chain ID to query
-    ?signature              string                       Event signature for CTE generation
-    ?engine                 string    = (auto)           Force engine: postgres or clickhouse
-    ?live                   bool      = false            Enable SSE streaming on new blocks
-GET /metrics                                             Prometheus metrics
+GET  /health                                             Health check
+GET  /status                                             Sync status for all chains
+GET  /query                                              Execute SQL query
+     ?sql                   string    (required)         SQL query (SELECT only)
+     ?chainId               number    (required)         Chain ID to query
+     ?signature             string                       Event signature for CTE generation
+     ?engine                string    = postgres         Query engine: postgres or clickhouse
+     ?live                  bool      = false            Enable SSE streaming (postgres only)
+GET  /views?chainId=                                     List materialized views
+GET  /views/{name}?chainId=                              Get view details
+POST /views                                              Create view (Tailscale + API key)
+DELETE /views/{name}?chainId=                            Delete view (Tailscale + API key)
+GET  /metrics                                            Prometheus metrics
 ```
 
 ### Views API
