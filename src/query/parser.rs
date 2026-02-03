@@ -118,25 +118,10 @@ impl EventSignature {
             format!(", {}", selects.join(", "))
         };
 
-        // Convert tx_hash/address from '\x...' format to '0x...' format
-        let include_tx_hash = used_columns
-            .map(|cols| cols.contains("tx_hash"))
-            .unwrap_or(true);
-        let include_address = used_columns
-            .map(|cols| cols.contains("address"))
-            .unwrap_or(true);
-
-        // tx_hash/address are stored as '\xABCD...' - replace '\x' with '0x'
-        let tx_hash_col = if include_tx_hash {
-            "concat('0x', lower(substring(tx_hash, 3))) AS tx_hash"
-        } else {
-            "tx_hash"
-        };
-        let address_col = if include_address {
-            "concat('0x', lower(substring(address, 3))) AS address"
-        } else {
-            "address"
-        };
+        // Always convert tx_hash/address from '\x...' format to '0x...' format
+        // for consistent output regardless of which decoded columns are requested
+        let tx_hash_col = "concat('0x', lower(substring(tx_hash, 3))) AS tx_hash";
+        let address_col = "concat('0x', lower(substring(address, 3))) AS address";
 
         // selector is stored as '\xABCD...' string, compare directly
         format!(
@@ -807,6 +792,7 @@ impl AbiType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use insta::assert_snapshot;
 
     // ========================================================================
     // EventSignature Parsing Tests
@@ -855,17 +841,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cte_generation() {
+    fn test_cte_generation_postgres() {
         let sig = EventSignature::parse(
             "Transfer(address indexed from, address indexed to, uint256 value)",
         )
         .unwrap();
-        let cte = sig.to_cte_sql();
-        assert!(cte.contains("transfer AS"));
-        assert!(cte.contains("abi_address(topic1)"));
-        assert!(cte.contains("abi_address(topic2)"));
-        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32))"));
-        assert!(cte.contains("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"));
+        assert_snapshot!(sig.to_cte_sql_postgres());
     }
 
     #[test]
@@ -896,24 +877,13 @@ mod tests {
             "Transfer(address indexed from, address indexed to, uint256 value)",
         )
         .unwrap();
-        let cte = sig.to_cte_sql_clickhouse();
-        assert!(cte.contains("transfer AS"));
-        // ClickHouse: addresses from topics use substring to get last 40 hex chars
-        // topic1 = '\x000...address' -> substring(topic1, 27) gets last 40 chars
-        assert!(cte.contains("concat('0x', lower(substring(topic1, 27)))"));
-        assert!(cte.contains("concat('0x', lower(substring(topic2, 27)))"));
-        // ClickHouse: uint256 from data uses unhex then reinterpret
-        assert!(cte.contains("reinterpretAsUInt256(reverse(unhex(substring(data"));
-        // ClickHouse: selector comparison uses string match with '\x' prefix
-        // Note: \\x in the output because we're generating SQL with escaped backslash
-        assert!(cte.contains(r"selector = '\\x"));
+        assert_snapshot!(sig.to_cte_sql_clickhouse());
     }
 
     #[test]
     fn test_extract_column_references() {
         let cols = extract_column_references("SELECT \"to\", COUNT(*) FROM transfer GROUP BY \"to\"");
         assert!(cols.contains("to"));
-        // COUNT is a function, not a column reference
 
         let cols = extract_column_references("SELECT value, SUM(amount) FROM t WHERE x > 5");
         assert!(cols.contains("value"));
@@ -936,12 +906,7 @@ mod tests {
         .unwrap();
         
         let used_cols: HashSet<String> = ["to"].iter().map(|s| s.to_string()).collect();
-        let cte = sig.to_cte_sql_clickhouse_filtered(Some(&used_cols));
-        
-        // Should include "to" but not "from" or "value"
-        assert!(cte.contains("AS \"to\""));
-        assert!(!cte.contains("AS \"from\""));
-        assert!(!cte.contains("AS \"value\""));
+        assert_snapshot!(sig.to_cte_sql_clickhouse_filtered(Some(&used_cols)));
     }
 
     #[test]
@@ -952,12 +917,7 @@ mod tests {
         .unwrap();
         
         let used_cols: HashSet<String> = ["from", "value"].iter().map(|s| s.to_string()).collect();
-        let cte = sig.to_cte_sql_clickhouse_filtered(Some(&used_cols));
-        
-        // Should include "from" and "value" but not "to"
-        assert!(cte.contains("AS \"from\""));
-        assert!(cte.contains("AS \"value\""));
-        assert!(!cte.contains("AS \"to\""));
+        assert_snapshot!(sig.to_cte_sql_clickhouse_filtered(Some(&used_cols)));
     }
 
     #[test]
@@ -968,12 +928,7 @@ mod tests {
         .unwrap();
         
         let used_cols: HashSet<String> = ["value"].iter().map(|s| s.to_string()).collect();
-        let cte = sig.to_cte_sql_postgres_filtered(Some(&used_cols));
-        
-        // Should include "value" but not "from" or "to"
-        assert!(cte.contains("abi_uint(substring(data FROM 1 FOR 32)) AS \"value\""));
-        assert!(!cte.contains("\"from\""));
-        assert!(!cte.contains("\"to\""));
+        assert_snapshot!(sig.to_cte_sql_postgres_filtered(Some(&used_cols)));
     }
 
     #[test]
@@ -982,32 +937,18 @@ mod tests {
             "Transfer(address indexed from, address indexed to, uint256 value)",
         )
         .unwrap();
-        
-        let cte = sig.to_cte_sql_clickhouse_filtered(None);
-        
-        // Should include all columns
-        assert!(cte.contains("\"from\""));
-        assert!(cte.contains("\"to\""));
-        assert!(cte.contains("\"value\""));
+        assert_snapshot!(sig.to_cte_sql_clickhouse_filtered(None));
     }
 
     #[test]
     fn test_cte_filtered_preserves_offsets() {
-        // When skipping "from", "to" should still use topic2 and "value" should still use data offset 0
         let sig = EventSignature::parse(
             "Transfer(address indexed from, address indexed to, uint256 value)",
         )
         .unwrap();
         
         let used_cols: HashSet<String> = ["to", "value"].iter().map(|s| s.to_string()).collect();
-        let cte = sig.to_cte_sql_clickhouse_filtered(Some(&used_cols));
-        
-        // "to" is the second indexed param, so it should still be topic2
-        assert!(cte.contains("topic2"));
-        assert!(cte.contains("AS \"to\""));
-        // "value" is the first data param: hex_start = 3 + 0*2 = 3, so substring(data, 3, 64)
-        assert!(cte.contains("substring(data, 3, 64)"));
-        assert!(cte.contains("AS \"value\""));
+        assert_snapshot!(sig.to_cte_sql_clickhouse_filtered(Some(&used_cols)));
     }
 
     // ========================================================================
@@ -1106,11 +1047,7 @@ mod tests {
         .unwrap();
 
         let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xdAC17F958D2ee523a2206206994597C13D831ec7'"#;
-        let rewritten = sig.rewrite_filters_for_pushdown(sql);
-        
-        // Should rewrite "from" = '0x...' to topic1 = '0x000...dac17f...'
-        assert!(rewritten.contains("topic1 = '0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7'"));
-        assert!(!rewritten.contains(r#""from" ="#));
+        assert_snapshot!(sig.rewrite_filters_for_pushdown(sql));
     }
 
     #[test]
@@ -1120,16 +1057,8 @@ mod tests {
         )
         .unwrap();
 
-        let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xabc' AND "to" = '0xdef'"#;
-        let rewritten = sig.rewrite_filters_for_pushdown(sql);
-        
-        // Should rewrite both (though abc/def are invalid addresses, encoding returns None)
-        // Let's use valid addresses
         let sql = r#"SELECT * FROM Transfer WHERE "from" = '0xdAC17F958D2ee523a2206206994597C13D831ec7' AND "to" = '0xa726a1CD723409074DF9108A2187cfA19899aCF8'"#;
-        let rewritten = sig.rewrite_filters_for_pushdown(sql);
-        
-        assert!(rewritten.contains("topic1 = '0x000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec7'"));
-        assert!(rewritten.contains("topic2 = '0x000000000000000000000000a726a1cd723409074df9108a2187cfa19899acf8'"));
+        assert_snapshot!(sig.rewrite_filters_for_pushdown(sql));
     }
 
     #[test]
@@ -1139,11 +1068,8 @@ mod tests {
         )
         .unwrap();
 
-        // "value" is not indexed, should not be rewritten
         let sql = r#"SELECT * FROM Transfer WHERE "value" = '1000000'"#;
         let rewritten = sig.rewrite_filters_for_pushdown(sql);
-        
-        // Should remain unchanged since we don't push down non-indexed columns
         assert_eq!(sql, rewritten);
     }
 
