@@ -84,3 +84,12 @@ jobs:
         with:
           tag_name: v${{ needs.calculate-version.outputs.version }}
           generate_release_notes: true
+
+  binaries:
+    name: Build Binaries
+    needs: [release, calculate-version]
+    uses: ./.github/workflows/binary.yml
+    permissions:
+      contents: write
+    with:
+      tag: v${{ needs.calculate-version.outputs.version }}

@@ -1,0 +1,70 @@
+name: Binary Releases
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.0.35)'
+        required: true
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: tidx-linux-amd64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: tidx-darwin-amd64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: tidx-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: strip target/${{ matrix.target }}/release/tidx || true
+      - run: mv target/${{ matrix.target }}/release/tidx ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  upload:
+    name: Upload Release Assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: artifacts/*
