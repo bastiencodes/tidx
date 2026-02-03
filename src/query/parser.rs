@@ -947,6 +947,115 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_table_references_query_patterns() {
+        let sig = EventSignature::parse("Transfer(address indexed from, address indexed to, uint256 value)").unwrap();
+        
+        // Simple SELECT
+        assert_eq!(
+            sig.normalize_table_references("SELECT \"to\", \"value\" FROM transfer WHERE \"from\" = '0x123'"),
+            "SELECT \"to\", \"value\" FROM Transfer WHERE \"from\" = '0x123'"
+        );
+        
+        // SELECT with alias
+        assert_eq!(
+            sig.normalize_table_references("SELECT t.\"to\" FROM transfer t"),
+            "SELECT t.\"to\" FROM Transfer t"
+        );
+        
+        // SELECT with AS alias
+        assert_eq!(
+            sig.normalize_table_references("SELECT t.\"to\" FROM transfer AS t"),
+            "SELECT t.\"to\" FROM Transfer AS t"
+        );
+        
+        // JOIN (self-join pattern)
+        assert_eq!(
+            sig.normalize_table_references("SELECT a.\"to\", b.\"from\" FROM transfer a JOIN transfer b ON a.\"to\" = b.\"from\""),
+            "SELECT a.\"to\", b.\"from\" FROM Transfer a JOIN Transfer b ON a.\"to\" = b.\"from\""
+        );
+        
+        // Subquery
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM (SELECT \"to\", SUM(\"value\") FROM transfer GROUP BY \"to\") sub"),
+            "SELECT * FROM (SELECT \"to\", SUM(\"value\") FROM Transfer GROUP BY \"to\") sub"
+        );
+        
+        // UNION ALL
+        assert_eq!(
+            sig.normalize_table_references("SELECT \"to\" as addr, \"value\" FROM transfer UNION ALL SELECT \"from\" as addr, -\"value\" FROM transfer"),
+            "SELECT \"to\" as addr, \"value\" FROM Transfer UNION ALL SELECT \"from\" as addr, -\"value\" FROM Transfer"
+        );
+        
+        // CTE (WITH clause) - user might write their own CTE referencing the event table
+        assert_eq!(
+            sig.normalize_table_references("WITH filtered AS (SELECT * FROM transfer WHERE \"value\" > 1000) SELECT * FROM filtered"),
+            "WITH filtered AS (SELECT * FROM Transfer WHERE \"value\" > 1000) SELECT * FROM filtered"
+        );
+        
+        // GROUP BY with aggregates
+        assert_eq!(
+            sig.normalize_table_references("SELECT \"to\", COUNT(*), SUM(\"value\") FROM transfer GROUP BY \"to\" HAVING COUNT(*) > 10"),
+            "SELECT \"to\", COUNT(*), SUM(\"value\") FROM Transfer GROUP BY \"to\" HAVING COUNT(*) > 10"
+        );
+        
+        // ORDER BY and LIMIT
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM transfer ORDER BY block_num DESC LIMIT 100"),
+            "SELECT * FROM Transfer ORDER BY block_num DESC LIMIT 100"
+        );
+        
+        // Window functions
+        assert_eq!(
+            sig.normalize_table_references("SELECT \"to\", \"value\", ROW_NUMBER() OVER (PARTITION BY \"to\" ORDER BY block_num) FROM transfer"),
+            "SELECT \"to\", \"value\", ROW_NUMBER() OVER (PARTITION BY \"to\" ORDER BY block_num) FROM Transfer"
+        );
+        
+        // IN subquery
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM transfer WHERE \"to\" IN (SELECT \"from\" FROM transfer WHERE \"value\" > 1000000)"),
+            "SELECT * FROM Transfer WHERE \"to\" IN (SELECT \"from\" FROM Transfer WHERE \"value\" > 1000000)"
+        );
+        
+        // EXISTS subquery
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM transfer t1 WHERE EXISTS (SELECT 1 FROM transfer t2 WHERE t2.\"to\" = t1.\"from\")"),
+            "SELECT * FROM Transfer t1 WHERE EXISTS (SELECT 1 FROM Transfer t2 WHERE t2.\"to\" = t1.\"from\")"
+        );
+    }
+
+    #[test]
+    fn test_normalize_different_event_names() {
+        // Test with Approval event
+        let sig = EventSignature::parse("Approval(address indexed owner, address indexed spender, uint256 value)").unwrap();
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM approval WHERE \"owner\" = '0x123'"),
+            "SELECT * FROM Approval WHERE \"owner\" = '0x123'"
+        );
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM APPROVAL"),
+            "SELECT * FROM Approval"
+        );
+        
+        // Test with Swap event (common in DEX)
+        let sig = EventSignature::parse("Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)").unwrap();
+        assert_eq!(
+            sig.normalize_table_references("SELECT address, SUM(\"amount0In\") FROM swap GROUP BY address"),
+            "SELECT address, SUM(\"amount0In\") FROM Swap GROUP BY address"
+        );
+        
+        // Test with lowercase event name in signature
+        let sig = EventSignature::parse("mint(address indexed to, uint256 amount)").unwrap();
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM MINT"),
+            "SELECT * FROM mint"
+        );
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM Mint"),
+            "SELECT * FROM mint"
+        );
+    }
+
+    #[test]
     fn test_cte_filtered_clickhouse_only_to() {
         let sig = EventSignature::parse(
             "Transfer(address indexed from, address indexed to, uint256 value)",
