@@ -72,8 +72,10 @@ impl ClickHouseEngine {
         let sql = if let Some(sig_str) = signature {
             let sig = EventSignature::parse(sig_str)?;
             
+            // Normalize table references to match CTE name (case-insensitive)
+            let sql = sig.normalize_table_references(sql);
             // Rewrite filters to push down to indexed columns (e.g., "from" = '0x...' -> topic1 = '0x...')
-            let sql = sig.rewrite_filters_for_pushdown(sql);
+            let sql = sig.rewrite_filters_for_pushdown(&sql);
             
             let cte = sig.to_cte_sql_clickhouse();
             format!("WITH {cte} {sql}")

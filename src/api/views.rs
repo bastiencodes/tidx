@@ -181,6 +181,7 @@ pub async fn create_view(
 
     // If signature provided, generate CTE with decoded columns and apply predicate pushdown
     let sql = if let Some(ref sig) = signature {
+        let sql = sig.normalize_table_references(&sql);
         let sql = sig.rewrite_filters_for_pushdown(&sql);
         let cte = sig.to_cte_sql_clickhouse();
         format!("WITH {} {}", cte, sql)

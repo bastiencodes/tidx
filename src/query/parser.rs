@@ -94,7 +94,7 @@ impl EventSignature {
     FROM logs
     WHERE selector = '\x{topic0}'
 )"#,
-            name = self.name.to_lowercase(),
+            name = self.name,
             select_clause = select_clause,
             topic0 = self.topic0_hex(),
         )
@@ -136,7 +136,7 @@ impl EventSignature {
     FROM logs
     WHERE selector = concat(char(92), 'x{topic0}')
 )"#,
-            name = self.name.to_lowercase(),
+            name = self.name,
             tx_hash_col = tx_hash_col,
             address_col = address_col,
             select_clause = select_clause,
@@ -265,6 +265,15 @@ impl EventSignature {
         }
 
         mapping
+    }
+
+    /// Normalize table references in SQL to match the CTE name (case-insensitive).
+    /// E.g., if event name is "Transfer", converts "FROM transfer" or "FROM TRANSFER" to "FROM Transfer"
+    pub fn normalize_table_references(&self, sql: &str) -> String {
+        // Build a case-insensitive regex to match the event name as a table reference
+        let pattern = format!(r"(?i)\b{}\b", regex_lite::escape(&self.name));
+        let re = regex_lite::Regex::new(&pattern).unwrap();
+        re.replace_all(sql, self.name.as_str()).into_owned()
     }
 
     /// Rewrite a SQL query to push down filters on decoded columns to use indexed raw columns.
@@ -900,6 +909,41 @@ mod tests {
         let cols = extract_column_references("SELECT t.from, t.to FROM transfer t");
         assert!(cols.contains("from"));
         assert!(cols.contains("to"));
+    }
+
+    #[test]
+    fn test_normalize_table_references() {
+        let sig = EventSignature::parse("Transfer(address indexed from, address indexed to, uint256 value)").unwrap();
+        
+        // lowercase -> original case
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM transfer"),
+            "SELECT * FROM Transfer"
+        );
+        
+        // uppercase -> original case
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM TRANSFER"),
+            "SELECT * FROM Transfer"
+        );
+        
+        // mixed case -> original case
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM TrAnSfEr"),
+            "SELECT * FROM Transfer"
+        );
+        
+        // multiple occurrences
+        assert_eq!(
+            sig.normalize_table_references("SELECT * FROM transfer UNION SELECT * FROM TRANSFER"),
+            "SELECT * FROM Transfer UNION SELECT * FROM Transfer"
+        );
+        
+        // shouldn't match partial words
+        assert_eq!(
+            sig.normalize_table_references("SELECT transfers FROM transfer"),
+            "SELECT transfers FROM Transfer"
+        );
     }
 
     #[test]
