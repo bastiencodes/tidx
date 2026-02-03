@@ -3,6 +3,7 @@ pub mod init;
 pub mod query;
 pub mod status;
 pub mod up;
+pub mod upgrade;
 pub mod views;
 
 use clap::{Parser, Subcommand};
@@ -10,6 +11,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "tidx")]
 #[command(about = "High-throughput Tempo blockchain indexer")]
+#[command(version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -29,4 +31,6 @@ pub enum Commands {
     Views(views::Args),
     /// Generate a new API key and add it to config
     ApiKey(api_key::Args),
+    /// Update tidx to the latest version
+    Upgrade,
 }

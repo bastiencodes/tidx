@@ -2,12 +2,8 @@ name: Publish Docker
 
 on:
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      version:
-        description: "Version tag (e.g., v1.2.3)"
-        type: string
-        required: false
+  release:
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,7 +37,7 @@ jobs:
           tags: |
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ inputs.version }},enable=${{ inputs.version != '' }}
+            type=ref,event=tag
 
       - name: Build and push
         uses: docker/build-push-action@v6
