@@ -38,6 +38,10 @@ pub struct HttpConfig {
     #[serde(default)]
     pub api_keys: Vec<String>,
 
+    /// Trusted CIDRs for admin operations (e.g., ["100.64.0.0/10"] for Tailscale)
+    #[serde(default)]
+    pub trusted_cidrs: Vec<String>,
+
     /// Rate limiting configuration
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
@@ -50,6 +54,7 @@ impl Default for HttpConfig {
             port: 8080,
             bind: "0.0.0.0".to_string(),
             api_keys: Vec::new(),
+            trusted_cidrs: Vec::new(),
             rate_limit: RateLimitConfig::default(),
         }
     }

@@ -3,7 +3,7 @@ mod views;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -57,6 +57,8 @@ pub struct AppState {
     pub rate_limiter: RateLimiter,
     /// ClickHouse engines for OLAP queries (per chain)
     pub clickhouse_engines: SharedClickHouseEngines,
+    /// Parsed trusted CIDRs for admin operations
+    pub trusted_cidrs: Arc<Vec<(IpAddr, u8)>>,
 }
 
 impl AppState {
@@ -68,6 +70,54 @@ impl AppState {
     async fn get_clickhouse(&self, chain_id: Option<u64>) -> Option<Arc<ClickHouseEngine>> {
         let id = chain_id.unwrap_or(self.default_chain_id);
         self.clickhouse_engines.read().await.get(&id).cloned()
+    }
+
+    /// Check if an IP address is in the trusted CIDRs
+    pub fn is_trusted_ip(&self, addr: &SocketAddr) -> bool {
+        if self.trusted_cidrs.is_empty() {
+            return true;
+        }
+        let ip = addr.ip();
+        self.trusted_cidrs.iter().any(|(network, prefix)| ip_in_cidr(&ip, network, *prefix))
+    }
+}
+
+/// Parse CIDR strings into (network, prefix_len) tuples
+pub fn parse_cidrs(cidrs: &[String]) -> Vec<(IpAddr, u8)> {
+    cidrs
+        .iter()
+        .filter_map(|cidr| {
+            let parts: Vec<&str> = cidr.split('/').collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let ip: IpAddr = parts[0].parse().ok()?;
+            let prefix: u8 = parts[1].parse().ok()?;
+            Some((ip, prefix))
+        })
+        .collect()
+}
+
+/// Check if an IP is within a CIDR range
+fn ip_in_cidr(ip: &IpAddr, network: &IpAddr, prefix_len: u8) -> bool {
+    match (ip, network) {
+        (IpAddr::V4(ip), IpAddr::V4(net)) => {
+            if prefix_len > 32 {
+                return false;
+            }
+            let mask = if prefix_len == 0 { 0 } else { u32::MAX << (32 - prefix_len) };
+            (u32::from(*ip) & mask) == (u32::from(*net) & mask)
+        }
+        (IpAddr::V6(ip), IpAddr::V6(net)) => {
+            if prefix_len > 128 {
+                return false;
+            }
+            let ip_bits = u128::from(*ip);
+            let net_bits = u128::from(*net);
+            let mask = if prefix_len == 0 { 0 } else { u128::MAX << (128 - prefix_len) };
+            (ip_bits & mask) == (net_bits & mask)
+        }
+        _ => false,
     }
 }
 
@@ -89,6 +139,8 @@ pub fn router_with_options(
 
     rate_limit::spawn_cleanup_task(rate_limiter.clone());
 
+    let trusted_cidrs = Arc::new(parse_cidrs(&http_config.trusted_cidrs));
+
     let state = AppState {
         pools: Arc::new(RwLock::new(pools)),
         default_chain_id,
@@ -96,6 +148,7 @@ pub fn router_with_options(
         clickhouse_configs: Arc::new(RwLock::new(clickhouse_configs)),
         rate_limiter: rate_limiter.clone(),
         clickhouse_engines: Arc::new(RwLock::new(HashMap::new())),
+        trusted_cidrs,
     };
 
     build_router(state, rate_limiter)
@@ -108,8 +161,10 @@ pub fn router_shared(
     clickhouse_configs: SharedClickHouseConfigs,
     http_config: SharedHttpConfig,
     clickhouse_engines: SharedClickHouseEngines,
+    trusted_cidrs: Vec<String>,
 ) -> Router<()> {
     let rate_limiter = RateLimiter::new_shared(http_config);
+    let trusted_cidrs = Arc::new(parse_cidrs(&trusted_cidrs));
 
     rate_limit::spawn_cleanup_task(rate_limiter.clone());
 
@@ -120,6 +175,7 @@ pub fn router_shared(
         clickhouse_configs,
         rate_limiter: rate_limiter.clone(),
         clickhouse_engines,
+        trusted_cidrs,
     };
 
     build_router(state, rate_limiter)
@@ -597,5 +653,58 @@ mod tests {
             rewrite_analytics_tables("SELECT * FROM logs JOIN token_holders ON 1=1", 42431),
             "SELECT * FROM logs JOIN analytics_42431.token_holders ON 1=1"
         );
+    }
+
+    #[test]
+    fn test_parse_cidrs() {
+        let cidrs = vec![
+            "100.64.0.0/10".to_string(),
+            "10.0.0.0/8".to_string(),
+            "192.168.1.0/24".to_string(),
+        ];
+        let parsed = parse_cidrs(&cidrs);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], ("100.64.0.0".parse().unwrap(), 10));
+        assert_eq!(parsed[1], ("10.0.0.0".parse().unwrap(), 8));
+        assert_eq!(parsed[2], ("192.168.1.0".parse().unwrap(), 24));
+    }
+
+    #[test]
+    fn test_parse_cidrs_invalid() {
+        let cidrs = vec![
+            "invalid".to_string(),
+            "100.64.0.0".to_string(),  // Missing prefix
+            "100.64.0.0/abc".to_string(),  // Invalid prefix
+        ];
+        let parsed = parse_cidrs(&cidrs);
+        assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn test_ip_in_cidr_v4() {
+        let network: IpAddr = "100.64.0.0".parse().unwrap();
+        
+        // Inside 100.64.0.0/10
+        assert!(ip_in_cidr(&"100.64.0.1".parse().unwrap(), &network, 10));
+        assert!(ip_in_cidr(&"100.100.50.25".parse().unwrap(), &network, 10));
+        assert!(ip_in_cidr(&"100.127.255.255".parse().unwrap(), &network, 10));
+        
+        // Outside 100.64.0.0/10
+        assert!(!ip_in_cidr(&"100.0.0.1".parse().unwrap(), &network, 10));
+        assert!(!ip_in_cidr(&"100.128.0.0".parse().unwrap(), &network, 10));
+        assert!(!ip_in_cidr(&"192.168.1.1".parse().unwrap(), &network, 10));
+    }
+
+    #[test]
+    fn test_ip_in_cidr_v6() {
+        let network: IpAddr = "fd7a:115c:a1e0::".parse().unwrap();
+        
+        // Inside fd7a:115c:a1e0::/48
+        assert!(ip_in_cidr(&"fd7a:115c:a1e0::1".parse().unwrap(), &network, 48));
+        assert!(ip_in_cidr(&"fd7a:115c:a1e0:ffff::1".parse().unwrap(), &network, 48));
+        
+        // Outside fd7a:115c:a1e0::/48
+        assert!(!ip_in_cidr(&"fd7a:115c:a1e1::1".parse().unwrap(), &network, 48));
+        assert!(!ip_in_cidr(&"2001:db8::1".parse().unwrap(), &network, 48));
     }
 }

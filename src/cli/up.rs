@@ -124,6 +124,7 @@ pub async fn run(args: Args) -> Result<()> {
                 Arc::clone(&clickhouse_configs),
                 http_config,
                 Arc::clone(&clickhouse_engines),
+                config.http.trusted_cidrs.clone(),
             );
 
             info!(addr = %addr, "Starting HTTP API server (hot-reload enabled)");

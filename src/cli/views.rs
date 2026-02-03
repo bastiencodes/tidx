@@ -8,10 +8,6 @@ pub struct Args {
     #[arg(long, env = "TIDX_URL")]
     pub url: String,
 
-    /// API key for mutations (create/delete)
-    #[arg(long, env = "TIDX_API_KEY")]
-    pub api_key: Option<String>,
-
     #[command(subcommand)]
     pub command: ViewsCommand,
 }
@@ -165,9 +161,6 @@ pub async fn run(args: Args) -> Result<()> {
         }
 
         ViewsCommand::Create { chain_id, name, sql, order_by, engine } => {
-            let api_key = args.api_key.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("--api-key required for create"))?;
-
             let url = format!("{}/views", base_url);
             let req = CreateViewRequest {
                 chain_id,
@@ -179,7 +172,6 @@ pub async fn run(args: Args) -> Result<()> {
 
             let resp: CreateViewResponse = client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
                 .json(&req)
                 .send()
                 .await?
@@ -197,13 +189,9 @@ pub async fn run(args: Args) -> Result<()> {
         }
 
         ViewsCommand::Delete { chain_id, name } => {
-            let api_key = args.api_key.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("--api-key required for delete"))?;
-
             let url = format!("{}/views/{}?chainId={}", base_url, name, chain_id);
             let resp: DeleteViewResponse = client
                 .delete(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
                 .send()
                 .await?
                 .json()

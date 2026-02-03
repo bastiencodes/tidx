@@ -58,17 +58,28 @@ tidx uses a hybrid PostgreSQL + ClickHouse architecture. Use the `engine` parame
 └─────────────────────┘                         └─────────────────────┘
 ```
 
-| Engine | Use Case | Example |
-|--------|----------|---------|
-| `postgres` (default) | Point lookups, real-time streaming | `WHERE hash = '0x...'` |
-| `clickhouse` | Aggregations, scans, analytics | `GROUP BY`, `COUNT(*)`, `SUM()` |
-
 ```bash
-# PostgreSQL (OLTP) - point lookups
-curl "http://<host>/query?chainId=4217&sql=SELECT * FROM txs WHERE hash = '0x...'"
+# PostgreSQL (OLTP) - last 10 transfers from an address
+curl "https://tidx.example.com/query \
+  ?chainId=4217 \
+  &signature=Transfer(address,address,uint256) \
+  &sql=SELECT * FROM Transfer WHERE from = '0x...' ORDER BY block_num DESC LIMIT 10"
 
-# ClickHouse (OLAP) - analytics
-curl "http://<host>/query?chainId=4217&engine=clickhouse&sql=SELECT COUNT(*) FROM txs"
+# ClickHouse (OLAP) - same query, faster for large scans
+curl "https://tidx.example.com/query \
+  ?chainId=4217 \
+  &engine=clickhouse \
+  &signature=Transfer(address,address,uint256) \
+  &sql=SELECT * FROM Transfer WHERE from = '0x...' ORDER BY block_num DESC LIMIT 10"
+
+# ClickHouse (OLAP) - query pre-computed views
+curl "https://tidx.example.com/views?chainId=4217"
+> {"ok":true,"views":[{"name":"top_holders"},{"name":"daily_volume"}]}
+
+curl "https://tidx.example.com/query \
+  ?chainId=4217 \
+  &engine=clickhouse \
+  &sql=SELECT * FROM top_holders LIMIT 10"
 ```
 
 ## Installation
@@ -102,6 +113,7 @@ enabled = true
 port = 8080
 bind = "0.0.0.0"
 api_keys = ["your-secret-api-key"]  # Optional: keys that bypass rate limiting
+trusted_cidrs = ["100.64.0.0/10"]   # Optional: trusted IPs for admin operations (e.g., Tailscale)
 
 [http.rate_limit]
 enabled = true
@@ -117,7 +129,7 @@ port = 9090
 name = "mainnet"
 chain_id = 4217
 rpc_url = "https://rpc.tempo.xyz"
-pg_url = "postgres://user:pass@<host>:5432/tidx_mainnet"
+pg_url = "postgres://user:pass@tidx.example.com:5432/tidx_mainnet"
 batch_size = 100
 
 # Optional: ClickHouse for OLAP queries (uses MaterializedPostgreSQL)
@@ -129,7 +141,7 @@ url = "http://clickhouse:8123"
 name = "moderato"
 chain_id = 42431
 rpc_url = "https://rpc.moderato.tempo.xyz"
-pg_url = "postgres://user:pass@<host>:5432/tidx_moderato"
+pg_url = "postgres://user:pass@tidx.example.com:5432/tidx_moderato"
 ```
 
 ### Reference
@@ -140,6 +152,7 @@ pg_url = "postgres://user:pass@<host>:5432/tidx_moderato"
 ├── port                    u16       = 8080         HTTP server port
 ├── bind                    string    = "0.0.0.0"    Bind address
 ├── api_keys                string[]  = []           API keys that bypass rate limiting
+├── trusted_cidrs           string[]  = []           Trusted CIDRs for admin ops (e.g., Tailscale)
 └── [rate_limit]                                     Rate limiting for unauthenticated requests
     ├── enabled             bool      = true         Enable rate limiting
     ├── requests_per_window u32       = 100          Max requests per window
@@ -171,6 +184,8 @@ Commands:
   up           Start syncing blocks from the chain (continuous) and serve HTTP API
   status       Show sync status
   query        Run a SQL query (use --signature to decode event logs)
+  views        Manage ClickHouse materialized views
+  upgrade      Update tidx to the latest version
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -236,6 +251,34 @@ Options:
   -h, --help                   Print help
 ```
 
+### `tidx views`
+
+```
+Manage ClickHouse materialized views
+
+Usage: tidx views --url <URL> <COMMAND>
+
+Commands:
+  list    List all views for a chain
+  get     Get view details
+  create  Create a new materialized view
+  delete  Delete a view
+
+Options:
+      --url <URL>  TIDX HTTP API URL [env: TIDX_URL]
+  -h, --help       Print help
+```
+
+### `tidx upgrade`
+
+```
+Update tidx to the latest version
+
+Usage: tidx upgrade
+
+Downloads and replaces the current binary from GitHub releases.
+```
+
 ### Examples
 
 ```bash
@@ -252,6 +295,19 @@ tidx query "SELECT COUNT(*) FROM txs"
 tidx query \
   --signature "Transfer(address indexed from, address indexed to, uint256 value)" \
   "SELECT * FROM Transfer LIMIT 10"
+
+# List views
+tidx views --url https://tidx.example.com list --chain-id 4217
+
+# Create a view (must be run from trusted IP)
+tidx views --url https://tidx.example.com create \
+  --chain-id 4217 \
+  --name top_holders \
+  --sql "SELECT holder, SUM(balance) as total FROM balances GROUP BY holder" \
+  --order-by holder
+
+# Self-update
+tidx upgrade
 ```
 
 ## HTTP API
@@ -262,15 +318,15 @@ tidx exposes a HTTP API for querying the indexer.
 
 ```bash
 # Point lookup (auto-routed to PostgreSQL)
-curl "http://<host>/query?chainId=4217&sql=SELECT * FROM blocks WHERE num = 12345"
+curl "https://tidx.example.com/query?chainId=4217&sql=SELECT * FROM blocks WHERE num = 12345"
 > {"columns":["num","hash","timestamp"],"rows":[[12345,"0xabc...","2024-01-01T00:00:00Z"]],"row_count":1,"engine":"postgres","ok":true}
 
 # Aggregation (auto-routed to ClickHouse)
-curl "http://<host>/query?chainId=4217&sql=SELECT type, COUNT(*) FROM txs GROUP BY type"
+curl "https://tidx.example.com/query?chainId=4217&sql=SELECT type, COUNT(*) FROM txs GROUP BY type"
 > {"columns":["type","count"],"rows":[[0,50000],[2,120000]],"row_count":2,"engine":"clickhouse","ok":true}
 
 # Status
-curl http://<host>/status
+curl https://tidx.example.com/status
 > {"ok":true,"chains":[{"chain_id":4217,"synced_num":567890,"head_num":567890,"lag":0}]}
 ```
 
@@ -287,8 +343,8 @@ GET  /query                                              Execute SQL query
      ?live                  bool      = false            Enable SSE streaming (postgres only)
 GET  /views?chainId=                                     List materialized views
 GET  /views/{name}?chainId=                              Get view details
-POST /views                                              Create view (Tailscale + API key)
-DELETE /views/{name}?chainId=                            Delete view (Tailscale + API key)
+POST /views                                              Create view (trusted IP only)
+DELETE /views/{name}?chainId=                            Delete view (trusted IP only)
 GET  /metrics                                            Prometheus metrics
 ```
 
@@ -296,12 +352,12 @@ GET  /metrics                                            Prometheus metrics
 
 Manage ClickHouse materialized views for pre-computed analytics. Views are stored in `analytics_{chainId}` database and auto-update on new data.
 
-**Note:** POST and DELETE require connection from Tailscale IP (100.x.x.x) for security.
+**Note:** POST and DELETE require connection from a trusted IP (configured via `trusted_cidrs`).
 
 #### List Views
 
 ```bash
-curl "http://<host>/views?chainId=42431"
+curl "https://tidx.example.com/views?chainId=42431"
 ```
 
 ```json
@@ -314,10 +370,10 @@ curl "http://<host>/views?chainId=42431"
 }
 ```
 
-#### Create View (Tailscale only)
+#### Create View (trusted IP only)
 
 ```bash
-curl -X POST "http://<host>/views" \
+curl -X POST "https://tidx.example.com/views" \
   -H "Content-Type: application/json" \
   -d '{
     "chainId": 42431,
@@ -343,7 +399,7 @@ This creates:
 #### Get View Details
 
 ```bash
-curl "http://<host>/views/token_holders?chainId=42431"
+curl "https://tidx.example.com/views/token_holders?chainId=42431"
 ```
 
 ```json
@@ -355,10 +411,10 @@ curl "http://<host>/views/token_holders?chainId=42431"
 }
 ```
 
-#### Delete View (Tailscale only)
+#### Delete View (trusted IP only)
 
 ```bash
-curl -X DELETE "http://<host>/views/token_holders?chainId=42431"
+curl -X DELETE "https://tidx.example.com/views/token_holders?chainId=42431"
 ```
 
 ```json
@@ -374,7 +430,7 @@ Views are auto-prefixed with `analytics_{chainId}` when using `engine=clickhouse
 
 ```bash
 # Query the view (auto-prefixed)
-curl "http://<host>/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
+curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
 ```
 
 ## Schemas
