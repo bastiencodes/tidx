@@ -131,9 +131,15 @@ pub struct ChainConfig {
     #[serde(default)]
     pub trust_rpc: bool,
 
-    /// Environment variable name containing the `tidx_api` role password.
-    /// When set, the HTTP API uses a separate read-only connection pool
-    /// as the `tidx_api` user with this password.
+    /// Separate PostgreSQL URL for the HTTP API (e.g., a CNPG `-r` read replica).
+    /// When set, the API connection pool connects to this URL instead of `pg_url`.
+    /// If `api_pg_password_env` is also set, the password is injected into this URL.
+    #[serde(default)]
+    pub api_pg_url: Option<String>,
+
+    /// Environment variable name containing the API PostgreSQL password.
+    /// When set, replaces the password in `api_pg_url` with the env var value.
+    /// Has no effect without `api_pg_url`.
     #[serde(default)]
     pub api_pg_password_env: Option<String>,
 
@@ -240,10 +246,14 @@ impl ChainConfig {
         }
     }
 
-    /// Returns a separate API database URL if `api_pg_password_env` is configured.
-    /// The URL is derived from `pg_url` with the username set to `tidx_api`
-    /// and the password from the specified environment variable.
+    /// Returns a separate API database URL for read-only queries.
+    /// Returns `None` if `api_pg_url` is not set (API uses the main pool).
     pub fn resolved_api_pg_url(&self) -> Result<Option<String>> {
+        let api_url = match &self.api_pg_url {
+            Some(url) => url,
+            None => return Ok(None),
+        };
+
         match &self.api_pg_password_env {
             Some(pass_env) => {
                 let password = std::env::var(pass_env).with_context(|| {
@@ -251,19 +261,13 @@ impl ChainConfig {
                         "api_pg_password_env '{pass_env}' is set but environment variable not found"
                     )
                 })?;
-
-                let base_url = self.resolved_pg_url()?;
-                let mut url = url::Url::parse(&base_url)
-                    .with_context(|| format!("Invalid pg_url: {}", self.pg_url))?;
-
-                url.set_username("tidx_api")
-                    .map_err(|()| anyhow::anyhow!("Failed to set API username in pg_url"))?;
+                let mut url = url::Url::parse(api_url)
+                    .with_context(|| format!("Invalid api_pg_url: {api_url}"))?;
                 url.set_password(Some(&password))
-                    .map_err(|()| anyhow::anyhow!("Failed to set API password in pg_url"))?;
-
+                    .map_err(|()| anyhow::anyhow!("Failed to set password in api_pg_url"))?;
                 Ok(Some(url.to_string()))
             }
-            None => Ok(None),
+            None => Ok(Some(api_url.clone())),
         }
     }
 }
@@ -404,6 +408,7 @@ mod tests {
             concurrency: 4,
             backfill_first: false,
             trust_rpc: false,
+            api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
         };
@@ -428,6 +433,7 @@ mod tests {
             concurrency: 4,
             backfill_first: false,
             trust_rpc: false,
+            api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
         };
@@ -451,6 +457,7 @@ mod tests {
             concurrency: 4,
             backfill_first: false,
             trust_rpc: false,
+            api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
         };
