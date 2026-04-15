@@ -13,6 +13,47 @@ pub fn timestamp_from_secs(secs: u64) -> DateTime<Utc> {
         .unwrap_or_else(|| Utc.timestamp_opt(0, 0).single().unwrap())
 }
 
+#[derive(Debug)]
+struct TxChainFields {
+    nonce_key: Vec<u8>,
+    fee_token: Option<Vec<u8>>,
+    calls_json: Option<serde_json::Value>,
+    call_count: i16,
+    valid_before: Option<i64>,
+    valid_after: Option<i64>,
+    signature_type: Option<i16>,
+}
+
+fn standard_evm_tx_fields(tx_type: u8) -> Option<TxChainFields> {
+    // EIP-2718 transaction types seen on Ethereum-family chains.
+    // Keep Tempo-only columns nullable/defaulted for compatibility.
+    if matches!(tx_type, 0x0..=0x3) {
+        Some(TxChainFields {
+            nonce_key: vec![0u8; 32],
+            fee_token: None,
+            calls_json: None,
+            call_count: 1,
+            valid_before: None,
+            valid_after: None,
+            signature_type: None,
+        })
+    } else {
+        None
+    }
+}
+
+fn fallback_tx_fields() -> TxChainFields {
+    TxChainFields {
+        nonce_key: vec![0u8; 32],
+        fee_token: None,
+        calls_json: None,
+        call_count: 1,
+        valid_before: None,
+        valid_after: None,
+        signature_type: Some(0),
+    }
+}
+
 pub fn decode_block(block: &Block) -> BlockRow {
     let timestamp_secs = block.header.timestamp;
     let timestamp = timestamp_from_secs(timestamp_secs);
@@ -34,34 +75,41 @@ pub fn decode_block(block: &Block) -> BlockRow {
 pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
     let block_timestamp = timestamp_from_secs(block.header.timestamp);
     let inner: &Recovered<TempoTxEnvelope> = &tx.inner;
+    let tx_type = inner.ty() as u8;
 
-    // Extract Tempo-specific fields if this is a 0x76 transaction
-    let (nonce_key, fee_token, calls_json, call_count, valid_before, valid_after, signature_type) =
-        if let TempoTxEnvelope::AA(aa_signed) = inner.as_ref() {
-            let tempo_tx = aa_signed.tx();
-            (
-                tempo_tx.nonce_key.to_be_bytes_vec(),
-                tempo_tx.fee_token.map(|a| a.as_slice().to_vec()),
-                serde_json::to_value(&tempo_tx.calls).ok(),
-                tempo_tx.calls.len() as i16,
-                tempo_tx.valid_before.map(|v| v as i64),
-                tempo_tx.valid_after.map(|v| v as i64),
-                Some(match aa_signed.signature().signature_type() {
-                    SignatureType::Secp256k1 => 0,
-                    SignatureType::P256 => 1,
-                    SignatureType::WebAuthn => 2,
-                }),
-            )
-        } else {
-            (vec![0u8; 32], None, None, 1, None, None, Some(0))
-        };
+    // Extract Tempo-specific fields for AA txs, otherwise use generic EVM defaults.
+    let chain_fields = if let TempoTxEnvelope::AA(aa_signed) = inner.as_ref() {
+        let tempo_tx = aa_signed.tx();
+        TxChainFields {
+            nonce_key: tempo_tx.nonce_key.to_be_bytes_vec(),
+            fee_token: tempo_tx.fee_token.map(|a| a.as_slice().to_vec()),
+            calls_json: serde_json::to_value(&tempo_tx.calls).ok(),
+            call_count: tempo_tx.calls.len() as i16,
+            valid_before: tempo_tx.valid_before.map(|v| v as i64),
+            valid_after: tempo_tx.valid_after.map(|v| v as i64),
+            signature_type: Some(match aa_signed.signature().signature_type() {
+                SignatureType::Secp256k1 => 0,
+                SignatureType::P256 => 1,
+                SignatureType::WebAuthn => 2,
+            }),
+        }
+    } else if let Some(fields) = standard_evm_tx_fields(tx_type) {
+        fields
+    } else {
+        tracing::debug!(
+            tx_type,
+            tx_hash = %tx.tx_hash(),
+            "Unknown non-Tempo transaction type; applying fallback Tempo-compatible defaults"
+        );
+        fallback_tx_fields()
+    };
 
     TxRow {
         block_num: block.header.number as i64,
         block_timestamp,
         idx: idx as i32,
         hash: tx.tx_hash().as_slice().to_vec(),
-        tx_type: inner.ty() as i16,
+        tx_type: tx_type as i16,
         from: inner.signer().as_slice().to_vec(),
         to: inner.to().map(|a| a.as_slice().to_vec()),
         value: inner.value().to_string(),
@@ -70,15 +118,15 @@ pub fn decode_transaction(tx: &Transaction, block: &Block, idx: u32) -> TxRow {
         max_fee_per_gas: inner.max_fee_per_gas().to_string(),
         max_priority_fee_per_gas: inner.max_priority_fee_per_gas().map_or("0".into(), |v| v.to_string()),
         gas_used: None,
-        nonce_key,
+        nonce_key: chain_fields.nonce_key,
         nonce: inner.nonce() as i64,
-        fee_token,
+        fee_token: chain_fields.fee_token,
         fee_payer: None, // Recovered from receipt
-        calls: calls_json,
-        call_count,
-        valid_before,
-        valid_after,
-        signature_type,
+        calls: chain_fields.calls_json,
+        call_count: chain_fields.call_count,
+        valid_before: chain_fields.valid_before,
+        valid_after: chain_fields.valid_after,
+        signature_type: chain_fields.signature_type,
     }
 }
 
@@ -207,6 +255,26 @@ mod tests {
         assert_eq!(txs[1].fee_payer, None);
         assert_eq!(txs[2].gas_used, Some(63000));
         assert_eq!(txs[2].fee_payer, Some(vec![0x02; 20]));
+    }
+
+    #[test]
+    fn standard_evm_fields_supported_types() {
+        for tx_type in [0u8, 1, 2, 3] {
+            let fields = standard_evm_tx_fields(tx_type).expect("standard tx type must be supported");
+            assert_eq!(fields.nonce_key.len(), 32);
+            assert!(fields.fee_token.is_none());
+            assert!(fields.calls_json.is_none());
+            assert_eq!(fields.call_count, 1);
+            assert!(fields.valid_before.is_none());
+            assert!(fields.valid_after.is_none());
+            assert!(fields.signature_type.is_none());
+        }
+    }
+
+    #[test]
+    fn standard_evm_fields_rejects_unknown_types() {
+        assert!(standard_evm_tx_fields(0x76).is_none());
+        assert!(standard_evm_tx_fields(0x7f).is_none());
     }
 }
 
