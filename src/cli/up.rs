@@ -273,6 +273,7 @@ fn spawn_sync_engine(
         "Starting sync for chain (throttled pool: 16 connections, backfill limited)"
     );
 
+    let backfill_enabled = chain.backfill;
     let backfill_first = chain.backfill_first;
     let trust_rpc = chain.trust_rpc;
 
@@ -339,7 +340,7 @@ fn spawn_sync_engine(
         // Auto-backfill ClickHouse from PostgreSQL in background (non-blocking).
         // SyncEngine starts immediately so new blocks are indexed while CH catches up.
         // Retries indefinitely with exponential backoff on failure.
-        {
+        if backfill_enabled {
             let backfill_sinks = sinks.clone();
             let backfill_chain_name = chain.name.clone();
             let backfill_chain_id = chain.chain_id;
@@ -363,6 +364,8 @@ fn spawn_sync_engine(
                     }
                 }
             });
+        } else {
+            info!(chain = %chain.name, "Backfill disabled; skipping ClickHouse backfill worker");
         }
 
         // Create sync engine with throttled pool and configured sinks (retry on transient RPC failures)
@@ -373,6 +376,7 @@ fn spawn_sync_engine(
                         .with_broadcaster(broadcaster)
                         .with_batch_size(chain.batch_size)
                         .with_concurrency(chain.concurrency)
+                        .with_backfill_enabled(backfill_enabled)
                         .with_backfill_first(backfill_first)
                         .with_trust_rpc(trust_rpc);
                 }

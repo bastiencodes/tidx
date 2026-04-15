@@ -39,6 +39,7 @@ pub struct SyncEngine {
     broadcaster: Option<Arc<Broadcaster>>,
     batch_size: u64,
     concurrency: usize,
+    backfill_enabled: bool,
     backfill_first: bool,
     /// Skip parent hash validation (trust RPC for reorg handling)
     trust_rpc: bool,
@@ -68,6 +69,7 @@ impl SyncEngine {
             broadcaster: None,
             batch_size: 100,
             concurrency: 4,
+            backfill_enabled: true,
             backfill_first: false,
             trust_rpc: false,
         })
@@ -80,6 +82,11 @@ impl SyncEngine {
 
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency.max(1);
+        self
+    }
+
+    pub fn with_backfill_enabled(mut self, backfill_enabled: bool) -> Self {
+        self.backfill_enabled = backfill_enabled;
         self
     }
 
@@ -114,11 +121,45 @@ impl SyncEngine {
     ///
     /// If backfill_first is true, completes all backfill before starting realtime.
     pub async fn run(&mut self, shutdown: broadcast::Receiver<()>) -> Result<()> {
+        if !self.backfill_enabled {
+            return self.run_realtime_only(shutdown).await;
+        }
         if self.backfill_first {
             self.run_backfill_first(shutdown).await
         } else {
             self.run_concurrent(shutdown).await
         }
+    }
+
+    async fn run_realtime_only(&mut self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
+        let state = load_sync_state(self.pool(), self.chain_id)
+            .await?
+            .unwrap_or_default();
+        let mut realtime_progress = SyncProgress::new(self.chain_id, state.tip_num);
+        info!(
+            chain_id = self.chain_id,
+            tip_num = state.tip_num,
+            synced_num = state.synced_num,
+            trust_rpc = self.trust_rpc,
+            "Starting sync engine in realtime-only mode (backfill disabled)"
+        );
+
+        loop {
+            tokio::select! {
+                _ = shutdown.recv() => {
+                    info!("Shutting down sync engine");
+                    break;
+                }
+                result = self.tick_realtime(&mut realtime_progress) => {
+                    if let Err(e) = result {
+                        error!(error = %e, "Realtime sync tick failed");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Run backfill to completion, then switch to realtime sync.
