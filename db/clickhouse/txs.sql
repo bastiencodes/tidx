@@ -16,13 +16,3 @@ CREATE TABLE IF NOT EXISTS txs (
 ) ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(block_timestamp)
 ORDER BY (block_num, idx);
-
--- Migration: remove legacy Tempo-only columns.
-ALTER TABLE txs DROP COLUMN IF EXISTS nonce_key;
-ALTER TABLE txs DROP COLUMN IF EXISTS fee_token;
-ALTER TABLE txs DROP COLUMN IF EXISTS fee_payer;
-ALTER TABLE txs DROP COLUMN IF EXISTS calls;
-ALTER TABLE txs DROP COLUMN IF EXISTS call_count;
-ALTER TABLE txs DROP COLUMN IF EXISTS valid_before;
-ALTER TABLE txs DROP COLUMN IF EXISTS valid_after;
-ALTER TABLE txs DROP COLUMN IF EXISTS signature_type;

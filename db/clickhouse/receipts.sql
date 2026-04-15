@@ -13,6 +13,3 @@ CREATE TABLE IF NOT EXISTS receipts (
 ) ENGINE = ReplacingMergeTree()
 PARTITION BY toYYYYMM(block_timestamp)
 ORDER BY (block_num, tx_idx);
-
--- Migration: remove legacy Tempo-only column if present.
-ALTER TABLE receipts DROP COLUMN IF EXISTS fee_payer;
