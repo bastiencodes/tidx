@@ -439,7 +439,7 @@ impl SyncEngine {
     /// Validate parent hash chain for a batch of blocks.
     /// Returns Ok(()) if chain is valid, Err(ReorgDetected { block }) if a reorg is detected.
     /// Skipped entirely if trust_rpc is enabled.
-    async fn validate_parent_chain(&self, blocks: &[crate::tempo::Block]) -> Result<()> {
+    async fn validate_parent_chain(&self, blocks: &[crate::chain::Block]) -> Result<()> {
         if blocks.is_empty() || self.trust_rpc {
             return Ok(());
         }
@@ -544,7 +544,7 @@ impl SyncEngine {
         from: u64,
         to: u64,
     ) -> Result<(
-        Vec<crate::tempo::Block>,
+        Vec<crate::chain::Block>,
         Vec<crate::types::BlockRow>,
         Vec<crate::types::TxRow>,
         Vec<crate::types::LogRow>,

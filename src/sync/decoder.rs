@@ -4,7 +4,7 @@ use alloy::network::{ReceiptResponse, TransactionResponse};
 use chrono::{DateTime, TimeZone, Utc};
 use tempo_alloy::primitives::transaction::SignatureType;
 
-use crate::tempo::{Block, Log, Receipt, Transaction, TempoTxEnvelope};
+use crate::chain::{Block, Log, Receipt, TempoTxEnvelope, Transaction};
 use crate::types::{BlockRow, LogRow, ReceiptRow, TxRow};
 
 pub fn timestamp_from_secs(secs: u64) -> DateTime<Utc> {

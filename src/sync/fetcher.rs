@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokio::sync::Semaphore;
 
 use crate::metrics;
-use crate::tempo::{Block, Log, Receipt};
+use crate::chain::{Block, Log, Receipt};
 
 /// Default max concurrent RPC requests (prevents overwhelming RPC endpoints)
 const DEFAULT_MAX_CONCURRENT_REQUESTS: usize = 8;
