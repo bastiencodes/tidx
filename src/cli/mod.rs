@@ -29,7 +29,7 @@ pub enum Commands {
     Query(query::Args),
     /// Manage ClickHouse materialized views
     Views(views::Args),
-    /// Backfill txs.gas_used and txs.fee_payer from receipts
+    /// Backfill txs.gas_used from receipts
     BackfillReceiptData(backfill_receipt_data::Args),
     /// Update tidx to the latest version
     Upgrade,

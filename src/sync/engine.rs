@@ -1547,7 +1547,7 @@ async fn tick_receipt_backfill(sinks: &SinkSet, rpc: &RpcClient, chain_id: u64) 
     if let (Some(lo), Some(hi)) = (min_block, max_block) {
         let conn = pool.get().await?;
         conn.execute(
-            "UPDATE txs SET gas_used = r.gas_used, fee_payer = r.fee_payer \
+            "UPDATE txs SET gas_used = r.gas_used \
              FROM receipts r \
              WHERE txs.block_num = r.block_num AND txs.idx = r.tx_idx \
                AND txs.block_num >= $1 AND txs.block_num <= $2 \
