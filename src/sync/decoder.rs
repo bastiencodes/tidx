@@ -291,6 +291,6 @@ pub fn decode_receipt(receipt: &Receipt, block_timestamp: DateTime<Utc>) -> Rece
         cumulative_gas_used: receipt.cumulative_gas_used() as i64,
         effective_gas_price: Some(receipt.effective_gas_price().to_string()),
         status: if receipt.status() { Some(1) } else { Some(0) },
-        fee_payer: Some(receipt.fee_payer.as_slice().to_vec()),
+        fee_payer: None,
     }
 }
