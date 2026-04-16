@@ -52,9 +52,7 @@ pub async fn list_tokens(
         .filter_map(|row| {
             let contract_address = row.first()?.as_str()?.to_string();
             let created_at = row.get(1)?.as_str()?.to_string();
-            if total_count == 0 {
-                total_count = row.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
-            }
+            total_count = row.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
             Some(Erc20Token {
                 contract_address,
                 created_at,
