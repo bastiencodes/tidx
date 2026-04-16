@@ -68,7 +68,12 @@ pub async fn get_approvals(
         .ok_or_else(|| ApiError::Internal("No default chain configured".to_string()))?;
 
     let sql = CURRENT_APPROVALS_SQL.replace("{owner}", &owner);
-    let options = QueryOptions::default();
+    // Default 5s is too tight for outlier addresses with millions of approvals
+    // (~5s on PG). P99 users (~65 approvals) complete in ~2ms regardless.
+    let options = QueryOptions {
+        timeout_ms: 30_000,
+        ..QueryOptions::default()
+    };
 
     let result = execute_query_postgres(&pool, &sql, &[APPROVAL_SIGNATURE], &options)
         .await
