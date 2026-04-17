@@ -469,36 +469,19 @@ A new token appears as `pending` within sync latency (~2–12s) and flips to `ok
 
 ## Decoding
 
-tidx can resolve function selectors and event topic0s to their canonical text
-signatures (e.g. `0xa9059cbb` → `transfer(address,uint256)`) using a local
-mirror of [Sourcify's Parquet export](https://docs.sourcify.dev/docs/repository/download-dataset/).
-Combined with the types embedded in the signature, this is enough to decode
-calldata and event logs to `{name, inputs[]}` form on read.
+Resolves function selectors and event topic0s to canonical text signatures
+(e.g. `0xa9059cbb` → `transfer(address,uint256)`) from a local mirror of
+[Sourcify's Parquet export](https://docs.sourcify.dev/docs/repository/download-dataset/).
+Opt-in per chain via `decode = true` (~1.68 GB storage as of April 2026).
 
-- **Source** — Sourcify `v2/signatures/` bucket (GCS-backed, public, updated daily). ~8M canonical keccak-to-text mappings, ~420 MB compressed.
-- **Storage** — per-chain `signatures` table in Postgres, ~1.68 GB loaded (as of April 2026).
-- **Opt-in** — set `decode = true` per chain in `config.toml`. Defaults to off; the flag gates `tidx seed-signatures` today and will gate the API decode path once it lands.
-- **Collisions** — multiple text signatures can share a 4-byte function selector. The decoder tries each candidate against the calldata via `alloy-dyn-abi` and keeps the one that parses. Event topic0s are 32-byte and don't collide in practice.
-
-### Seeding
-
-Run once after deploying:
+Load and refresh with:
 
 ```bash
 tidx seed-signatures --config config.toml
 ```
 
-This downloads the Sourcify Parquet export via `aws s3 sync`, converts it to
-CSV using `duckdb`, and streams it into every chain where `decode = true`.
-Chains without the flag are logged and skipped. Requires `aws` and `duckdb`
-on `PATH`.
-
-### Refreshing
-
-Schedule the same command daily (cron / systemd timer / k8s CronJob) to pick
-up newly verified contracts. `aws s3 sync` only transfers files whose ETags
-changed on S3, so daily deltas are typically tens of MB even though the
-in-DB reload is full (TRUNCATE + COPY, ~20s per chain).
+Requires `aws` and `duckdb` on `PATH`. `aws s3 sync` is incremental — daily
+refreshes typically transfer tens of MB. Schedule nightly via cron:
 
 ```
 0 3 * * *   cd /app && tidx seed-signatures --config config.toml
