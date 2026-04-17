@@ -1,6 +1,7 @@
 //! Latest-blocks endpoint.
 //!
-//! `GET /blocks?chainId=X&limit=N`         — newest N blocks from the `blocks` table.
+//! `GET /blocks?chainId=X`                  — newest [`LIST_LIMIT`] blocks from the
+//!                                            `blocks` table.
 //! `GET /blocks?chainId=X&live=true`       — SSE stream: initial snapshot, then one
 //!                                            event per newly indexed block. Mirrors
 //!                                            the `/query?live=true` framing
@@ -22,19 +23,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiError, AppState};
 
-const DEFAULT_LIMIT: i64 = 20;
-const MAX_LIMIT: i64 = 100;
-
-fn default_limit() -> i64 {
-    DEFAULT_LIMIT
-}
+/// Fixed page size. Not user-selectable for now; revisit when pagination lands.
+const LIST_LIMIT: i64 = 20;
 
 #[derive(Deserialize)]
 pub struct BlocksParams {
     #[serde(alias = "chain_id", rename = "chainId")]
     chain_id: u64,
-    #[serde(default = "default_limit")]
-    limit: i64,
     #[serde(default)]
     live: bool,
 }
@@ -56,7 +51,7 @@ pub struct BlocksResponse {
     query_time_ms: f64,
 }
 
-/// `GET /blocks?chainId=X&limit=N[&live=true]`
+/// `GET /blocks?chainId=X[&live=true]`
 pub async fn list_blocks(
     State(state): State<AppState>,
     Query(params): Query<BlocksParams>,
@@ -72,7 +67,6 @@ async fn handle_once(
     state: AppState,
     params: BlocksParams,
 ) -> Result<Json<BlocksResponse>, ApiError> {
-    let limit = params.limit.clamp(1, MAX_LIMIT);
     let pool = state
         .get_pool(Some(params.chain_id))
         .await
@@ -84,7 +78,7 @@ async fn handle_once(
 
     let start = Instant::now();
     let rows = conn
-        .query(LIST_SQL, &[&limit])
+        .query(LIST_SQL, &[&LIST_LIMIT])
         .await
         .map_err(|e| ApiError::QueryError(e.to_string()))?;
 
@@ -123,7 +117,6 @@ async fn handle_live(
     params: BlocksParams,
 ) -> Sse<KeepAliveStream<SseStream>> {
     let chain_id = params.chain_id;
-    let limit = params.limit.clamp(1, MAX_LIMIT);
 
     // Resolve pool before entering the stream so we can surface an immediate
     // error event if the chain is unknown, matching /query?live=true behaviour.
@@ -155,7 +148,7 @@ async fn handle_live(
                     return;
                 }
             };
-            match conn.query(LIST_SQL, &[&limit]).await {
+            match conn.query(LIST_SQL, &[&LIST_LIMIT]).await {
                 Ok(rows) => {
                     let blocks: Vec<Block> = rows.iter().map(row_to_block).collect();
                     let count = blocks.len();
@@ -172,14 +165,12 @@ async fn handle_live(
             }
         };
 
-        let last_seen = snapshot.blocks.first().map(|b| b.number).unwrap_or(0);
+        let mut last_seen = snapshot.blocks.first().map(|b| b.number).unwrap_or(0);
 
         yield Ok(SseEvent::default()
             .event("result")
             .json_data(snapshot)
             .unwrap());
-
-        let mut last_seen = last_seen;
 
         loop {
             match rx.recv().await {
