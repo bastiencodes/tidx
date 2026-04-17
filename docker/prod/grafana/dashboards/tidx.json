@@ -64,7 +64,7 @@
       },
       "targets": [
         {
-          "expr": "tidx_synced{chain_id=~\"$chain_id\"}",
+          "expr": "(tidx_sync_lag_blocks{chain_id=~\"$chain_id\"} == bool 0)",
           "legendFormat": "chain {{chain_id}}",
           "refId": "A"
         }
@@ -139,7 +139,7 @@
       ],
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -150,7 +150,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "locale",
+          "decimals": 0
         }
       }
     },
@@ -178,7 +179,7 @@
       ],
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
@@ -189,7 +190,8 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "locale",
+          "decimals": 0
         }
       }
     },
@@ -349,7 +351,7 @@
       "id": 6,
       "type": "stat",
       "title": "Backfill remaining (PG)",
-      "description": "Postgres backfill distance-to-origin. 0 = historic sync complete.",
+      "description": "Postgres backfill distance-to-origin. Only populates while backfill is actively running; shows 'No data' once caught up.",
       "gridPos": {
         "x": 20,
         "y": 4,
@@ -413,12 +415,13 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "locale",
           "custom": {
             "drawStyle": "line",
             "lineInterpolation": "linear",
             "fillOpacity": 0
-          }
+          },
+          "decimals": 0
         }
       },
       "options": {
