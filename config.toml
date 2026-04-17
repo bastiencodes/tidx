@@ -1,5 +1,3 @@
-# tidx — `${VAR}` is expanded from the process env at load time. Escape with `$${VAR}`.
-
 [http]
 enabled = true
 port = 8080

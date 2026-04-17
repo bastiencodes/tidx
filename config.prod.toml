@@ -1,0 +1,34 @@
+[http]
+enabled = true
+port = 8080
+bind = "0.0.0.0"
+
+[prometheus]
+enabled = true
+port = 9090
+
+[[chains]]
+name = "mainnet"
+chain_id = 1
+rpc_url = "${TIDX_RPC_URL_ETH_MAINNET}"
+pg_url = "postgres://tidx:tidx@localhost:5433/tidx_mainnet"
+backfill = false
+batch_size = 200
+concurrency = 4
+
+[chains.clickhouse]
+enabled = true
+url = "http://localhost:8123"
+
+[[chains]]
+name = "sepolia"
+chain_id = 11155111
+rpc_url = "${TIDX_RPC_URL_ETH_SEPOLIA}"
+pg_url = "postgres://tidx:tidx@localhost:5433/tidx_sepolia"
+backfill = false
+batch_size = 200
+concurrency = 4
+
+[chains.clickhouse]
+enabled = true
+url = "http://localhost:8123"

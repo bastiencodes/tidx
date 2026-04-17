@@ -66,6 +66,59 @@ cargo run -- up --config /path/to/config.toml
 cargo run -- status
 ```
 
+### Run in a worktree (runbook)
+
+Follow these steps when landing in a fresh git worktree and you need the
+indexer running. Multiple worktrees can run their own indexer concurrently
+against the shared docker-compose infra — `make dev` derives unique HTTP
+and Prometheus ports from the worktree directory name.
+
+**Step 1 — confirm shared infra is running.** postgres and clickhouse must
+be up (typically started once from the main checkout with `make up`).
+Quick check:
+
+```bash
+docker ps --format '{{.Names}}' | grep -E 'postgres|clickhouse'
+```
+
+If nothing returns, start the infra from the main checkout:
+`docker compose -f docker/prod/docker-compose.yml up -d postgres clickhouse`.
+
+**Step 2 — make sure `.env` is available in this worktree.** `.env` is
+gitignored, so fresh worktrees don't have one. Symlink the main checkout's
+`.env` (one-time per worktree):
+
+```bash
+# Adjust the path to wherever your main checkout lives.
+ln -s /absolute/path/to/main/tidx/.env .env
+```
+
+`.env.example` at the repo root lists the variables that must be populated
+(RPC URLs in particular).
+
+**Step 3 — start the indexer.**
+
+```bash
+make dev
+```
+
+`make dev` prints the per-worktree ports, then:
+1. Derives a stable port offset from `basename $(pwd)` (base 18080 / 19090,
+   offset 0–899) so concurrent worktrees don't collide.
+2. Generates `config.local.toml` (gitignored) from `config.prod.toml` with
+   those ports patched in.
+3. Sources `.env` if present and runs
+   `cargo run -- up --config config.local.toml`.
+
+**Step 4 — verify.** Hit the health endpoint on the HTTP port that
+`make dev` printed (e.g. `curl http://localhost:18082/health`). You should
+get `{"ok": true, ...}`.
+
+**Note on data isolation.** Worktrees share the postgres databases declared
+in `config.prod.toml` (`tidx_mainnet`, `tidx_sepolia`). If you need a
+worktree to write into its own database, edit `config.local.toml` (or
+change `pg_url` in `config.prod.toml` before running `make dev`).
+
 ### HTTP API Endpoints
 ```bash
 # Health check
