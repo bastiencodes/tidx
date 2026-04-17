@@ -3,6 +3,8 @@
 //! `GET /transactions?chainId=X`                 — newest [`LIST_LIMIT`]
 //!                                                 transactions joined with
 //!                                                 their receipts.
+//! `GET /transactions?chainId=X&block=N`         — all transactions for block
+//!                                                 `N`, ordered by index.
 //! `GET /transactions?chainId=X&live=true`       — SSE stream: initial
 //!                                                 snapshot, then one event
 //!                                                 per newly indexed block
@@ -10,7 +12,8 @@
 //!                                                 transactions. Mirrors the
 //!                                                 `/blocks?live=true` framing
 //!                                                 (`event: result` / `lagged`
-//!                                                 / `error`).
+//!                                                 / `error`). Not compatible
+//!                                                 with `block=`.
 
 use std::convert::Infallible;
 use std::time::Instant;
@@ -37,6 +40,8 @@ pub struct TransactionsParams {
     chain_id: u64,
     #[serde(default)]
     live: bool,
+    #[serde(default)]
+    block: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -67,12 +72,18 @@ pub struct TransactionsResponse {
     query_time_ms: f64,
 }
 
-/// `GET /transactions?chainId=X[&live=true]`
+/// `GET /transactions?chainId=X[&block=N][&live=true]`
 pub async fn list_transactions(
     State(state): State<AppState>,
     Query(params): Query<TransactionsParams>,
 ) -> Response {
     if params.live {
+        if params.block.is_some() {
+            return ApiError::BadRequest(
+                "block filter is not supported with live=true".to_string(),
+            )
+            .into_response();
+        }
         handle_live(state, params).await.into_response()
     } else {
         handle_once(state, params).await.into_response()
@@ -93,10 +104,19 @@ async fn handle_once(
         .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
 
     let start = Instant::now();
-    let rows = conn
-        .query(LATEST_SQL, &[&LIST_LIMIT])
-        .await
-        .map_err(|e| ApiError::QueryError(e.to_string()))?;
+    let rows = match params.block {
+        Some(block_num) => {
+            let block_num = i64::try_from(block_num)
+                .map_err(|_| ApiError::BadRequest(format!("block out of range: {block_num}")))?;
+            conn.query(BY_BLOCK_SQL, &[&block_num])
+                .await
+                .map_err(|e| ApiError::QueryError(e.to_string()))?
+        }
+        None => conn
+            .query(LATEST_SQL, &[&LIST_LIMIT])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+    };
 
     let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
     let count = transactions.len();
