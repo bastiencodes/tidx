@@ -63,7 +63,7 @@ pub struct Erc20ApprovalsResponse {
 /// Returns the current (latest) ERC20 approvals for the given owner address.
 /// "Current" means the most recent Approval event per (contract, spender) pair,
 /// which is the effective allowance at the latest indexed block.
-pub async fn get_approvals(
+pub async fn list_approvals(
     State(state): State<AppState>,
     Query(params): Query<ApprovalsParams>,
 ) -> Result<Json<Erc20ApprovalsResponse>, ApiError> {

@@ -39,7 +39,7 @@ pub struct TransfersResponse {
 }
 
 /// GET /transfers?address=0x...&direction=in&chainId=1
-pub async fn get_transfers(
+pub async fn list_transfers(
     State(state): State<AppState>,
     Query(params): Query<TransferParams>,
 ) -> Result<Json<TransfersResponse>, ApiError> {
