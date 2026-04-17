@@ -33,6 +33,7 @@
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [HTTP API](#http-api)
+- [Decoding](#decoding)
 - [Database Schema](#database-schema)
 - [Sync Architecture](#sync-architecture)
 - [Development](#development)
@@ -180,6 +181,7 @@ pg_password_env = "TIDX_PG_PASSWORD"
 ├── pg_password_env         string    (optional)     Env var name for PostgreSQL password
 ├── api_pg_url              string    (optional)     Separate PostgreSQL URL for API (e.g., read replica)
 ├── api_pg_password_env     string    (optional)     Env var name for API PostgreSQL password
+├── decode                  bool      = false        Enable Sourcify signature cache for this chain (see Decoding)
 ├── batch_size              u64       = 100          Blocks per RPC batch request
 └── [clickhouse]                                     ClickHouse OLAP settings
     ├── enabled             bool      = false        Enable ClickHouse OLAP queries
@@ -465,6 +467,43 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
 
+## Decoding
+
+tidx can resolve function selectors and event topic0s to their canonical text
+signatures (e.g. `0xa9059cbb` → `transfer(address,uint256)`) using a local
+mirror of [Sourcify's Parquet export](https://docs.sourcify.dev/docs/repository/download-dataset/).
+Combined with the types embedded in the signature, this is enough to decode
+calldata and event logs to `{name, inputs[]}` form on read.
+
+- **Source** — Sourcify `v2/signatures/` bucket (GCS-backed, public, updated daily). ~8M canonical keccak-to-text mappings, ~420 MB compressed.
+- **Storage** — per-chain `signatures` table in Postgres, ~1.6 GB loaded.
+- **Opt-in** — set `decode = true` per chain in `config.toml`. Defaults to off; the flag gates `tidx seed-signatures` today and will gate the API decode path once it lands.
+- **Collisions** — multiple text signatures can share a 4-byte function selector. The decoder tries each candidate against the calldata via `alloy-dyn-abi` and keeps the one that parses. Event topic0s are 32-byte and don't collide in practice.
+
+### Seeding
+
+Run once after deploying:
+
+```bash
+tidx seed-signatures --config config.toml
+```
+
+This downloads the Sourcify Parquet export via `aws s3 sync`, converts it to
+CSV using `duckdb`, and streams it into every chain where `decode = true`.
+Chains without the flag are logged and skipped. Requires `aws` and `duckdb`
+on `PATH`.
+
+### Refreshing
+
+Schedule the same command daily (cron / systemd timer / k8s CronJob) to pick
+up newly verified contracts. `aws s3 sync` only transfers files whose ETags
+changed on S3, so daily deltas are typically tens of MB even though the
+in-DB reload is full (TRUNCATE + COPY, ~20s per chain).
+
+```
+0 3 * * *   cd /app && tidx seed-signatures --config config.toml
+```
+
 ## Schemas
 
 All tables use composite primary keys with timestamps for efficient range queries:
@@ -596,6 +635,7 @@ make down              Stop all services
 make logs              Tail indexer logs
 make build             Build Docker image
 make seed              Generate transactions
+make seed-signatures   Load Sourcify signature cache (see Decoding)
 
 make bench             Run benchmarks
 make check             Run clippy lints

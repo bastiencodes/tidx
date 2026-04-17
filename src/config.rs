@@ -113,6 +113,13 @@ pub struct ChainConfig {
     #[serde(default = "default_backfill")]
     pub backfill: bool,
 
+    /// Maintain the decoded-signatures cache for this chain (default: false).
+    /// When true, `tidx seed-signatures` will load Sourcify's signature dump
+    /// into this chain's database, and the API will decode calldata/logs on
+    /// request. Storage cost is ~1.6 GB per chain.
+    #[serde(default)]
+    pub decode: bool,
+
     /// Batch size for RPC requests (default: 100)
     #[serde(default = "default_batch_size")]
     pub batch_size: u64,
@@ -457,6 +464,7 @@ mod tests {
             pg_url: "postgres://user:pass@localhost/db".to_string(),
             pg_password_env: None,
             backfill: true,
+            decode: false,
             batch_size: 100,
             concurrency: 4,
             backfill_first: false,
@@ -482,6 +490,7 @@ mod tests {
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("PATH".to_string()),
             backfill: true,
+            decode: false,
             batch_size: 100,
             concurrency: 4,
             backfill_first: false,
@@ -558,6 +567,7 @@ mod tests {
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("NONEXISTENT_VAR_XYZ_999".to_string()),
             backfill: true,
+            decode: false,
             batch_size: 100,
             concurrency: 4,
             backfill_first: false,
