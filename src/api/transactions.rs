@@ -59,8 +59,9 @@ pub struct TransactionsParams {
 pub struct Transaction {
     hash: String,
     block_number: i64,
-    /// Unix seconds.
-    block_timestamp: i64,
+    /// RFC3339 timestamp.
+    block_timestamp: String,
+    block_timestamp_ms: i64,
     transaction_index: i32,
     from: String,
     to: Option<String>,
@@ -69,7 +70,10 @@ pub struct Transaction {
     tx_type: i16,
     input: String,
     gas_limit: i64,
+    max_fee_per_gas: String,
+    max_priority_fee_per_gas: String,
     gas_used: Option<i64>,
+    cumulative_gas_used: Option<i64>,
     effective_gas_price: Option<String>,
     status: Option<i16>,
     contract_address: Option<String>,
@@ -129,19 +133,19 @@ async fn handle_once(
     let start = Instant::now();
     let rows = match (address_bytes, block_num) {
         (Some(addr), Some(bn)) => conn
-            .query(BY_ADDRESS_AND_BLOCK_SQL, &[&addr, &bn, &LIST_LIMIT])
+            .query(&by_address_and_block_sql(), &[&addr, &bn, &LIST_LIMIT])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
         (Some(addr), None) => conn
-            .query(BY_ADDRESS_SQL, &[&addr, &LIST_LIMIT])
+            .query(&by_address_sql(), &[&addr, &LIST_LIMIT])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
         (None, Some(bn)) => conn
-            .query(BY_BLOCK_SQL, &[&bn])
+            .query(&by_block_sql(), &[&bn])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
         (None, None) => conn
-            .query(LATEST_SQL, &[&LIST_LIMIT])
+            .query(&latest_sql(), &[&LIST_LIMIT])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
     };
@@ -153,11 +157,11 @@ async fn handle_once(
     Ok(Json(TransactionsResponse { ok: true, transactions, count, query_time_ms }))
 }
 
-const LATEST_SQL: &str = r#"
-    SELECT
+/// Column list shared by all transaction queries. Must match `row_to_tx` positions.
+const TX_COLS: &str = r#"
         t.hash,
         t.block_num,
-        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
+        t.block_timestamp,
         t.idx,
         t."from",
         t."to",
@@ -166,64 +170,51 @@ const LATEST_SQL: &str = r#"
         t.type,
         t.input,
         t.gas_limit,
+        t.max_fee_per_gas,
+        t.max_priority_fee_per_gas,
         r.gas_used,
+        r.cumulative_gas_used,
         r.effective_gas_price,
-        r.status,
-        r.contract_address
+        r.contract_address,
+        r.status
+"#;
+
+fn latest_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
     FROM txs t
     LEFT JOIN receipts r
       ON r.tx_hash = t.hash
      AND r.block_num = t.block_num
     ORDER BY t.block_num DESC, t.idx DESC
     LIMIT $1
-"#;
+"#
+    )
+}
 
-const BY_BLOCK_SQL: &str = r#"
-    SELECT
-        t.hash,
-        t.block_num,
-        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
-        t.idx,
-        t."from",
-        t."to",
-        t.value,
-        t.nonce,
-        t.type,
-        t.input,
-        t.gas_limit,
-        r.gas_used,
-        r.effective_gas_price,
-        r.status,
-        r.contract_address
+fn by_block_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
     FROM txs t
     LEFT JOIN receipts r
       ON r.tx_hash = t.hash
      AND r.block_num = t.block_num
     WHERE t.block_num = $1
     ORDER BY t.idx ASC
-"#;
+"#
+    )
+}
 
 // UNION ALL over the two indexed legs (`idx_txs_from`, `idx_txs_to`) rather
 // than `WHERE "from" = $1 OR "to" = $1`, since Postgres typically won't combine
 // two separate indexes for an OR on different columns. Each leg is capped at
 // $2 so the outer ORDER BY never scans more than 2 * LIMIT rows.
-const BY_ADDRESS_SQL: &str = r#"
-    SELECT
-        t.hash,
-        t.block_num,
-        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
-        t.idx,
-        t."from",
-        t."to",
-        t.value,
-        t.nonce,
-        t.type,
-        t.input,
-        t.gas_limit,
-        r.gas_used,
-        r.effective_gas_price,
-        r.status,
-        r.contract_address
+fn by_address_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
     FROM (
         (SELECT * FROM txs WHERE "from" = $1 ORDER BY block_timestamp DESC LIMIT $2)
         UNION ALL
@@ -234,25 +225,14 @@ const BY_ADDRESS_SQL: &str = r#"
      AND r.block_num = t.block_num
     ORDER BY t.block_num DESC, t.idx DESC
     LIMIT $2
-"#;
+"#
+    )
+}
 
-const BY_ADDRESS_AND_BLOCK_SQL: &str = r#"
-    SELECT
-        t.hash,
-        t.block_num,
-        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
-        t.idx,
-        t."from",
-        t."to",
-        t.value,
-        t.nonce,
-        t.type,
-        t.input,
-        t.gas_limit,
-        r.gas_used,
-        r.effective_gas_price,
-        r.status,
-        r.contract_address
+fn by_address_and_block_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
     FROM (
         (SELECT * FROM txs WHERE "from" = $1 AND block_num = $2 ORDER BY block_timestamp DESC LIMIT $3)
         UNION ALL
@@ -263,31 +243,52 @@ const BY_ADDRESS_AND_BLOCK_SQL: &str = r#"
      AND r.block_num = t.block_num
     ORDER BY t.idx ASC
     LIMIT $3
-"#;
+"#
+    )
+}
+
+fn by_hash_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
+    FROM txs t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    WHERE t.hash = $1
+    LIMIT 1
+"#
+    )
+}
 
 fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
     let hash: Vec<u8> = row.get(0);
+    let block_timestamp: DateTime<Utc> = row.get(2);
     let from: Vec<u8> = row.get(4);
     let to: Option<Vec<u8>> = row.get(5);
     let input: Vec<u8> = row.get(9);
-    let contract_address: Option<Vec<u8>> = row.get(14);
+    let contract_address: Option<Vec<u8>> = row.get(16);
 
     Transaction {
-        hash: format!("0x{}", hex::encode(&hash)),
+        hash: hex_prefixed(&hash),
         block_number: row.get(1),
-        block_timestamp: row.get(2),
+        block_timestamp: block_timestamp.to_rfc3339(),
+        block_timestamp_ms: block_timestamp.timestamp_millis(),
         transaction_index: row.get(3),
-        from: format!("0x{}", hex::encode(&from)),
-        to: to.map(|b| format!("0x{}", hex::encode(&b))),
+        from: hex_prefixed(&from),
+        to: to.as_deref().map(hex_prefixed),
         value: row.get(6),
         nonce: row.get(7),
         tx_type: row.get(8),
-        input: format!("0x{}", hex::encode(&input)),
+        input: hex_prefixed(&input),
         gas_limit: row.get(10),
-        gas_used: row.get(11),
-        effective_gas_price: row.get(12),
-        status: row.get(13),
-        contract_address: contract_address.map(|b| format!("0x{}", hex::encode(&b))),
+        max_fee_per_gas: row.get(11),
+        max_priority_fee_per_gas: row.get(12),
+        gas_used: row.get(13),
+        cumulative_gas_used: row.get(14),
+        effective_gas_price: row.get(15),
+        contract_address: contract_address.as_deref().map(hex_prefixed),
+        status: row.get(17),
     }
 }
 
@@ -330,7 +331,7 @@ async fn handle_live(
                     return;
                 }
             };
-            match conn.query(LATEST_SQL, &[&LIST_LIMIT]).await {
+            match conn.query(&latest_sql(), &[&LIST_LIMIT]).await {
                 Ok(rows) => {
                     let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
@@ -392,7 +393,7 @@ async fn handle_live(
 
                     for block_num in effective_start..=end {
                         let qstart = Instant::now();
-                        match conn.query(BY_BLOCK_SQL, &[&block_num]).await {
+                        match conn.query(&by_block_sql(), &[&block_num]).await {
                             Ok(rows) => {
                                 let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
                                 let count = transactions.len();
@@ -436,34 +437,9 @@ async fn handle_live(
 // Single-transaction detail endpoint: GET /transactions/:hash
 
 #[derive(Serialize)]
-pub struct TransactionDetail {
-    hash: String,
-    block_number: i64,
-    /// RFC3339 timestamp.
-    block_timestamp: String,
-    /// Unix seconds.
-    block_timestamp_unix: i64,
-    transaction_index: i32,
-    from: String,
-    to: Option<String>,
-    value: String,
-    nonce: i64,
-    tx_type: i16,
-    input: String,
-    gas_limit: i64,
-    max_fee_per_gas: String,
-    max_priority_fee_per_gas: String,
-    gas_used: Option<i64>,
-    cumulative_gas_used: Option<i64>,
-    effective_gas_price: Option<String>,
-    status: Option<i16>,
-    contract_address: Option<String>,
-}
-
-#[derive(Serialize)]
 pub struct TransactionResponse {
     ok: bool,
-    transaction: TransactionDetail,
+    transaction: Transaction,
     query_time_ms: f64,
 }
 
@@ -492,77 +468,20 @@ pub async fn get_transaction(
         .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
 
     let start = Instant::now();
-    let row_opt = conn
-        .query_opt(DETAIL_SQL, &[&hash_bytes])
+    let row = conn
+        .query_opt(&by_hash_sql(), &[&hash_bytes])
         .await
-        .map_err(|e| ApiError::QueryError(e.to_string()))?;
-
-    let row = row_opt
+        .map_err(|e| ApiError::QueryError(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound(format!("Transaction not found: {hash}")))?;
-
-    let hash_col: Vec<u8> = row.get(0);
-    let block_timestamp: DateTime<Utc> = row.get(2);
-    let from_col: Vec<u8> = row.get(4);
-    let to_col: Option<Vec<u8>> = row.get(5);
-    let input_col: Vec<u8> = row.get(9);
-    let contract_address: Option<Vec<u8>> = row.get(16);
 
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(Json(TransactionResponse {
         ok: true,
-        transaction: TransactionDetail {
-            hash: hex_prefixed(&hash_col),
-            block_number: row.get(1),
-            block_timestamp: block_timestamp.to_rfc3339(),
-            block_timestamp_unix: block_timestamp.timestamp(),
-            transaction_index: row.get(3),
-            from: hex_prefixed(&from_col),
-            to: to_col.as_deref().map(hex_prefixed),
-            value: row.get(6),
-            nonce: row.get(7),
-            tx_type: row.get(8),
-            input: hex_prefixed(&input_col),
-            gas_limit: row.get(10),
-            max_fee_per_gas: row.get(11),
-            max_priority_fee_per_gas: row.get(12),
-            gas_used: row.get(13),
-            cumulative_gas_used: row.get(14),
-            effective_gas_price: row.get(15),
-            status: row.get(17),
-            contract_address: contract_address.as_deref().map(hex_prefixed),
-        },
+        transaction: row_to_tx(&row),
         query_time_ms,
     }))
 }
-
-const DETAIL_SQL: &str = r#"
-    SELECT
-        t.hash,
-        t.block_num,
-        t.block_timestamp,
-        t.idx,
-        t."from",
-        t."to",
-        t.value,
-        t.nonce,
-        t.type,
-        t.input,
-        t.gas_limit,
-        t.max_fee_per_gas,
-        t.max_priority_fee_per_gas,
-        r.gas_used,
-        r.cumulative_gas_used,
-        r.effective_gas_price,
-        r.contract_address,
-        r.status
-    FROM txs t
-    LEFT JOIN receipts r
-      ON r.tx_hash = t.hash
-     AND r.block_num = t.block_num
-    WHERE t.hash = $1
-    LIMIT 1
-"#;
 
 /// Parse an `0x`-prefixed 20-byte Ethereum address into raw bytes for a
 /// `BYTEA` comparison against the `txs."from"` / `txs."to"` columns.
