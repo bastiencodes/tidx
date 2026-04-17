@@ -5,6 +5,11 @@
 //!                                                 their receipts.
 //! `GET /transactions?chainId=X&block=N`         — all transactions for block
 //!                                                 `N`, ordered by index.
+//! `GET /transactions?chainId=X&address=0x...`   — newest [`LIST_LIMIT`]
+//!                                                 transactions where `address`
+//!                                                 is either `from` or `to`.
+//!                                                 Combinable with `block=` to
+//!                                                 scope to a single block.
 //! `GET /transactions?chainId=X&live=true`       — SSE stream: initial
 //!                                                 snapshot, then one event
 //!                                                 per newly indexed block
@@ -13,7 +18,7 @@
 //!                                                 `/blocks?live=true` framing
 //!                                                 (`event: result` / `lagged`
 //!                                                 / `error`). Not compatible
-//!                                                 with `block=`.
+//!                                                 with `block=` or `address=`.
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -46,6 +51,8 @@ pub struct TransactionsParams {
     live: bool,
     #[serde(default)]
     block: Option<u64>,
+    #[serde(default)]
+    address: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -76,7 +83,7 @@ pub struct TransactionsResponse {
     query_time_ms: f64,
 }
 
-/// `GET /transactions?chainId=X[&block=N][&live=true]`
+/// `GET /transactions?chainId=X[&block=N][&address=0x...][&live=true]`
 pub async fn list_transactions(
     State(state): State<AppState>,
     Query(params): Query<TransactionsParams>,
@@ -85,6 +92,12 @@ pub async fn list_transactions(
         if params.block.is_some() {
             return ApiError::BadRequest(
                 "block filter is not supported with live=true".to_string(),
+            )
+            .into_response();
+        }
+        if params.address.is_some() {
+            return ApiError::BadRequest(
+                "address filter is not supported with live=true".to_string(),
             )
             .into_response();
         }
@@ -107,16 +120,27 @@ async fn handle_once(
         .await
         .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
 
+    let block_num = params
+        .block
+        .map(|b| i64::try_from(b).map_err(|_| ApiError::BadRequest(format!("block out of range: {b}"))))
+        .transpose()?;
+    let address_bytes = params.address.as_deref().map(parse_address).transpose()?;
+
     let start = Instant::now();
-    let rows = match params.block {
-        Some(block_num) => {
-            let block_num = i64::try_from(block_num)
-                .map_err(|_| ApiError::BadRequest(format!("block out of range: {block_num}")))?;
-            conn.query(BY_BLOCK_SQL, &[&block_num])
-                .await
-                .map_err(|e| ApiError::QueryError(e.to_string()))?
-        }
-        None => conn
+    let rows = match (address_bytes, block_num) {
+        (Some(addr), Some(bn)) => conn
+            .query(BY_ADDRESS_AND_BLOCK_SQL, &[&addr, &bn, &LIST_LIMIT])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+        (Some(addr), None) => conn
+            .query(BY_ADDRESS_SQL, &[&addr, &LIST_LIMIT])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+        (None, Some(bn)) => conn
+            .query(BY_BLOCK_SQL, &[&bn])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+        (None, None) => conn
             .query(LATEST_SQL, &[&LIST_LIMIT])
             .await
             .map_err(|e| ApiError::QueryError(e.to_string()))?,
@@ -177,6 +201,68 @@ const BY_BLOCK_SQL: &str = r#"
      AND r.block_num = t.block_num
     WHERE t.block_num = $1
     ORDER BY t.idx ASC
+"#;
+
+// UNION ALL over the two indexed legs (`idx_txs_from`, `idx_txs_to`) rather
+// than `WHERE "from" = $1 OR "to" = $1`, since Postgres typically won't combine
+// two separate indexes for an OR on different columns. Each leg is capped at
+// $2 so the outer ORDER BY never scans more than 2 * LIMIT rows.
+const BY_ADDRESS_SQL: &str = r#"
+    SELECT
+        t.hash,
+        t.block_num,
+        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
+        t.idx,
+        t."from",
+        t."to",
+        t.value,
+        t.nonce,
+        t.type,
+        t.input,
+        t.gas_limit,
+        r.gas_used,
+        r.effective_gas_price,
+        r.status,
+        r.contract_address
+    FROM (
+        (SELECT * FROM txs WHERE "from" = $1 ORDER BY block_timestamp DESC LIMIT $2)
+        UNION ALL
+        (SELECT * FROM txs WHERE "to" = $1 ORDER BY block_timestamp DESC LIMIT $2)
+    ) t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    ORDER BY t.block_num DESC, t.idx DESC
+    LIMIT $2
+"#;
+
+const BY_ADDRESS_AND_BLOCK_SQL: &str = r#"
+    SELECT
+        t.hash,
+        t.block_num,
+        EXTRACT(EPOCH FROM t.block_timestamp)::INT8,
+        t.idx,
+        t."from",
+        t."to",
+        t.value,
+        t.nonce,
+        t.type,
+        t.input,
+        t.gas_limit,
+        r.gas_used,
+        r.effective_gas_price,
+        r.status,
+        r.contract_address
+    FROM (
+        (SELECT * FROM txs WHERE "from" = $1 AND block_num = $2 ORDER BY block_timestamp DESC LIMIT $3)
+        UNION ALL
+        (SELECT * FROM txs WHERE "to" = $1 AND block_num = $2 ORDER BY block_timestamp DESC LIMIT $3)
+    ) t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    ORDER BY t.idx ASC
+    LIMIT $3
 "#;
 
 fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
@@ -478,6 +564,26 @@ const DETAIL_SQL: &str = r#"
     LIMIT 1
 "#;
 
+/// Parse an `0x`-prefixed 20-byte Ethereum address into raw bytes for a
+/// `BYTEA` comparison against the `txs."from"` / `txs."to"` columns.
+/// Case-insensitive; does not perform EIP-55 checksum validation.
+fn parse_address(addr: &str) -> Result<Vec<u8>, ApiError> {
+    let hex = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .ok_or_else(|| {
+            ApiError::BadRequest("address must be 0x-prefixed 20-byte hex".to_string())
+        })?;
+
+    if hex.len() != 40 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(ApiError::BadRequest(
+            "address must be 0x + 40 hex characters".to_string(),
+        ));
+    }
+
+    hex::decode(hex).map_err(|e| ApiError::BadRequest(format!("Invalid hex in address: {e}")))
+}
+
 fn parse_tx_hash(id: &str) -> Result<Vec<u8>, ApiError> {
     let hex = id
         .strip_prefix("0x")
@@ -534,5 +640,33 @@ mod tests {
     fn parse_tx_hash_rejects_garbage() {
         assert!(parse_tx_hash("0xzzzz").is_err());
         assert!(parse_tx_hash("latest").is_err());
+    }
+
+    #[test]
+    fn parse_address_lower() {
+        let bytes = parse_address("0xdac17f958d2ee523a2206206994597c13d831ec7").unwrap();
+        assert_eq!(bytes.len(), 20);
+    }
+
+    #[test]
+    fn parse_address_mixed_case() {
+        let bytes = parse_address("0xdAC17F958D2ee523a2206206994597C13D831ec7").unwrap();
+        assert_eq!(bytes.len(), 20);
+    }
+
+    #[test]
+    fn parse_address_rejects_missing_prefix() {
+        assert!(parse_address("dac17f958d2ee523a2206206994597c13d831ec7").is_err());
+    }
+
+    #[test]
+    fn parse_address_rejects_wrong_length() {
+        assert!(parse_address("0xdeadbeef").is_err());
+        assert!(parse_address("0xdac17f958d2ee523a2206206994597c13d831ec70000").is_err());
+    }
+
+    #[test]
+    fn parse_address_rejects_garbage() {
+        assert!(parse_address("0xGGGG7f958d2ee523a2206206994597c13d831ec7").is_err());
     }
 }
