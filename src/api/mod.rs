@@ -1,3 +1,4 @@
+mod blocks;
 mod erc20;
 mod views;
 
@@ -175,6 +176,7 @@ fn build_router(state: AppState) -> Router<()> {
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
         .route("/query", get(handle_query))
+        .route("/blocks", get(blocks::list_blocks))
         .route("/erc20/approvals", get(erc20::approvals::get_approvals))
         .route("/erc20/tokens", get(erc20::tokens::list_tokens))
         .route("/erc20/transfers", get(erc20::transfers::get_transfers))
