@@ -69,6 +69,12 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+    # Load secrets from the repo-root .env (see .env.example). Non-required so
+    # compose doesn't fail if the file is missing; tidx exits with a clear
+    # error if a referenced *_password_env var is unset.
+    env_file:
+      - path: ../../.env
+        required: false
     environment:
       RUST_LOG: ${RUST_LOG:-tidx=info}
       RUST_LOG_FORMAT: ${RUST_LOG_FORMAT:-pretty}

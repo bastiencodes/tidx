@@ -176,7 +176,21 @@ async fn print_status(config: &Config) -> Result<()> {
     println!();
 
     for chain in &config.chains {
-        let rpc = RpcClient::new(&chain.rpc_url);
+        let rpc_url = match chain.resolved_rpc_url() {
+            Ok(url) => url,
+            Err(e) => {
+                println!(
+                    "┌─ {} (chain_id: {}) ─────────────────────",
+                    chain.name, chain.chain_id
+                );
+                println!("│  Status: Failed to resolve rpc_url");
+                println!("│  Error: {e}");
+                println!("└───────────────────────────────────────────────────────────");
+                println!();
+                continue;
+            }
+        };
+        let rpc = RpcClient::new(&rpc_url);
         let live_head = rpc.latest_block_number().await.ok();
 
         println!(
@@ -249,8 +263,10 @@ async fn print_json_status(config: &Config) -> Result<()> {
     let mut chains = Vec::new();
 
     for chain in &config.chains {
-        let rpc = RpcClient::new(&chain.rpc_url);
-        let live_head = rpc.latest_block_number().await.ok();
+        let live_head = match chain.resolved_rpc_url() {
+            Ok(url) => RpcClient::new(&url).latest_block_number().await.ok(),
+            Err(_) => None,
+        };
 
         let (state, gaps) = match chain.resolved_pg_url() {
             Ok(pg_url) => match db::create_pool(&pg_url).await {

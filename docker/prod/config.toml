@@ -1,4 +1,8 @@
 # TIDX Indexer Configuration
+#
+# Secrets are not committed: passwords in URLs are placeholders. The matching
+# env vars (see `.env.example`) must be passed to the tidx container via
+# docker-compose (`environment:` or `env_file:`).
 
 [http]
 enabled = true
@@ -12,7 +16,8 @@ port = 9090
 [[chains]]
 name = "moderato"
 chain_id = 42431
-rpc_url = "https://eng:aphex-twin-jeff-mills@rpc.testnet.tempo.xyz"
+rpc_url = "https://eng:x@rpc.testnet.tempo.xyz"
+rpc_password_env = "TIDX_RPC_PASSWORD_MODERATO"
 pg_url = "postgres://tidx:tidx@postgres:5432/tidx_moderato"
 backfill = true
 batch_size = 100
@@ -25,7 +30,8 @@ url = "http://clickhouse:8123"
 [[chains]]
 name = "mainnet"
 chain_id = 4217
-rpc_url = "https://eng:aphex-twin-jeff-mills@rpc.tempo.xyz"
+rpc_url = "https://eng:x@rpc.tempo.xyz"
+rpc_password_env = "TIDX_RPC_PASSWORD_MAINNET"
 pg_url = "postgres://tidx:tidx@postgres:5432/tidx_mainnet"
 backfill = true
 batch_size = 100

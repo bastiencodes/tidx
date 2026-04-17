@@ -265,6 +265,14 @@ fn spawn_sync_engine(
     broadcaster: Arc<Broadcaster>,
     shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
+    let rpc_url = match chain.resolved_rpc_url() {
+        Ok(url) => url,
+        Err(e) => {
+            error!(error = %e, chain = %chain.name, "Failed to resolve rpc_url; skipping chain");
+            return;
+        }
+    };
+
     info!(
         chain = %chain.name,
         chain_id = chain.chain_id,
@@ -370,7 +378,7 @@ fn spawn_sync_engine(
 
         // Create sync engine with throttled pool and configured sinks (retry on transient RPC failures)
         let mut engine = loop {
-            match SyncEngine::new(throttled_pool.clone(), sinks.clone(), &chain.rpc_url).await {
+            match SyncEngine::new(throttled_pool.clone(), sinks.clone(), &rpc_url).await {
                 Ok(e) => {
                     break e
                         .with_broadcaster(broadcaster)
@@ -392,7 +400,7 @@ fn spawn_sync_engine(
         // don't contend with realtime/backfill semaphores.
         {
             let metadata_pool = throttled_pool.inner().clone();
-            let metadata_rpc = tidx::sync::fetcher::RpcClient::with_concurrency(&chain.rpc_url, 2);
+            let metadata_rpc = tidx::sync::fetcher::RpcClient::with_concurrency(&rpc_url, 2);
             let metadata_chain_id = chain.chain_id;
             let metadata_shutdown = shutdown_rx.resubscribe();
             tokio::spawn(async move {

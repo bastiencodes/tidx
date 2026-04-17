@@ -139,7 +139,9 @@ port = 9090
 [[chains]]
 name = "mainnet"
 chain_id = 4217
-rpc_url = "https://rpc.tempo.xyz"
+# Use a placeholder password in the URL; the real value comes from the env var.
+rpc_url = "https://eng:x@rpc.tempo.xyz"
+rpc_password_env = "TIDX_RPC_PASSWORD_MAINNET"
 pg_url = "postgres://user@tidx.example.com:5432/tidx_mainnet"
 pg_password_env = "TIDX_PG_PASSWORD"  # Password from environment variable
 batch_size = 100
@@ -173,7 +175,8 @@ pg_password_env = "TIDX_PG_PASSWORD"
 [[chains]]                                         Chain configuration 
 ├── name                    string    (required)     Display name for logging
 ├── chain_id                u64       (required)     Chain ID
-├── rpc_url                 string    (required)     JSON-RPC endpoint URL
+├── rpc_url                 string    (required)     JSON-RPC endpoint URL (use placeholder pw if rpc_password_env set)
+├── rpc_password_env        string    (optional)     Env var name for RPC basic-auth password
 ├── pg_url                  string    (required)     PostgreSQL connection string
 ├── pg_password_env         string    (optional)     Env var name for PostgreSQL password
 ├── api_pg_url              string    (optional)     Separate PostgreSQL URL for API (e.g., read replica)
