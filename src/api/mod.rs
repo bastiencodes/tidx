@@ -46,6 +46,7 @@ pub struct ChainClickHouseConfig {
 }
 
 pub type SharedClickHouseConfigs = Arc<RwLock<HashMap<u64, ChainClickHouseConfig>>>;
+pub type SharedChainNames = Arc<RwLock<HashMap<u64, String>>>;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -58,6 +59,8 @@ pub struct AppState {
     pub clickhouse_configs: SharedClickHouseConfigs,
     /// ClickHouse engines for OLAP queries (per chain)
     pub clickhouse_engines: SharedClickHouseEngines,
+    /// Map of chain_id -> display name (hot-reloadable, from ChainConfig.name)
+    pub chain_names: SharedChainNames,
     /// Parsed trusted CIDRs for admin operations
     pub trusted_cidrs: Arc<Vec<(IpAddr, u8)>>,
 }
@@ -123,7 +126,7 @@ fn ip_in_cidr(ip: &IpAddr, network: &IpAddr, prefix_len: u8) -> bool {
 }
 
 pub fn router(pools: HashMap<u64, Pool>, default_chain_id: u64, broadcaster: Arc<Broadcaster>) -> Router<()> {
-    router_with_options(pools, default_chain_id, broadcaster, HashMap::new(), &HttpConfig::default())
+    router_with_options(pools, default_chain_id, broadcaster, HashMap::new(), HashMap::new(), &HttpConfig::default())
 }
 
 pub fn router_with_options(
@@ -131,6 +134,7 @@ pub fn router_with_options(
     default_chain_id: u64,
     broadcaster: Arc<Broadcaster>,
     clickhouse_configs: HashMap<u64, ChainClickHouseConfig>,
+    chain_names: HashMap<u64, String>,
     http_config: &HttpConfig,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&http_config.trusted_cidrs));
@@ -141,6 +145,7 @@ pub fn router_with_options(
         broadcaster,
         clickhouse_configs: Arc::new(RwLock::new(clickhouse_configs)),
         clickhouse_engines: Arc::new(RwLock::new(HashMap::new())),
+        chain_names: Arc::new(RwLock::new(chain_names)),
         trusted_cidrs,
     };
 
@@ -153,6 +158,7 @@ pub fn router_shared(
     broadcaster: Arc<Broadcaster>,
     clickhouse_configs: SharedClickHouseConfigs,
     clickhouse_engines: SharedClickHouseEngines,
+    chain_names: SharedChainNames,
     trusted_cidrs: Vec<String>,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&trusted_cidrs));
@@ -163,6 +169,7 @@ pub fn router_shared(
         broadcaster,
         clickhouse_configs,
         clickhouse_engines,
+        chain_names,
         trusted_cidrs,
     };
 
@@ -178,6 +185,7 @@ fn build_router(state: AppState) -> Router<()> {
     Router::new()
         .route("/health", get(handle_health))
         .route("/status", get(handle_status))
+        .route("/chains", get(handle_chains))
         .route("/query", get(handle_query))
         .route("/blocks", get(blocks::list_blocks))
         .route("/blocks/{identifier}", get(blocks::get_block))
@@ -196,6 +204,32 @@ fn build_router(state: AppState) -> Router<()> {
 
 async fn handle_health() -> &'static str {
     "OK"
+}
+
+#[derive(Serialize)]
+struct ChainEntry {
+    chain_id: u64,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct ChainsResponse {
+    ok: bool,
+    chains: Vec<ChainEntry>,
+}
+
+async fn handle_chains(State(state): State<AppState>) -> Json<ChainsResponse> {
+    let pools = state.pools.read().await;
+    let names = state.chain_names.read().await;
+    let mut chains: Vec<ChainEntry> = pools
+        .keys()
+        .map(|chain_id| ChainEntry {
+            chain_id: *chain_id,
+            name: names.get(chain_id).cloned().unwrap_or_default(),
+        })
+        .collect();
+    chains.sort_by_key(|c| c.chain_id);
+    Json(ChainsResponse { ok: true, chains })
 }
 
 #[derive(Serialize)]

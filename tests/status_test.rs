@@ -136,6 +136,67 @@ async fn test_status_includes_configured_chain_when_sync_state_is_empty() {
 }
 
 #[tokio::test]
+async fn test_chains_endpoint_returns_configured_chains() {
+    let broadcaster = Arc::new(Broadcaster::new());
+
+    // /chains only reads pool keys — no DB access needed.
+    let mut cfg = PgConfig::new();
+    cfg.url = Some("postgres://tidx:tidx@127.0.0.1:1/tidx?connect_timeout=1".to_string());
+    let stub_pool = cfg
+        .create_pool(Some(Runtime::Tokio1), NoTls)
+        .expect("failed to create stub pool");
+
+    let mut pools = HashMap::new();
+    pools.insert(1u64, stub_pool.clone());
+    pools.insert(8453u64, stub_pool);
+
+    let mut names = HashMap::new();
+    names.insert(1u64, "ethereum".to_string());
+    names.insert(8453u64, "base".to_string());
+
+    let router = api::router_with_options(
+        pools,
+        1,
+        broadcaster,
+        HashMap::new(),
+        names,
+        &tidx::config::HttpConfig::default(),
+    );
+    let mut svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr> =
+        router.into_make_service_with_connect_info::<SocketAddr>();
+    let mut app = svc
+        .call(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/chains")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["ok"], true);
+    let chains = json["chains"].as_array().expect("chains should be array");
+    assert_eq!(chains.len(), 2);
+    // Sorted by chain_id ascending
+    assert_eq!(chains[0]["chain_id"], 1);
+    assert_eq!(chains[0]["name"], "ethereum");
+    assert_eq!(chains[1]["chain_id"], 8453);
+    assert_eq!(chains[1]["name"], "base");
+}
+
+#[tokio::test]
 async fn test_status_surfaces_query_failures() {
     let broadcaster = Arc::new(Broadcaster::new());
     let mut pools = HashMap::new();

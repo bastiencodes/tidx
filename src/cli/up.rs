@@ -9,7 +9,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use tidx::api::{
-    self, ChainClickHouseConfig, SharedClickHouseConfigs, SharedClickHouseEngines, SharedPools,
+    self, ChainClickHouseConfig, SharedChainNames, SharedClickHouseConfigs,
+    SharedClickHouseEngines, SharedPools,
 };
 use tidx::broadcast::Broadcaster;
 use tidx::clickhouse::ClickHouseEngine;
@@ -74,6 +75,7 @@ pub async fn run(args: Args) -> Result<()> {
     let pools: SharedPools = Arc::new(RwLock::new(HashMap::new()));
     let clickhouse_configs: SharedClickHouseConfigs = Arc::new(RwLock::new(HashMap::new()));
     let clickhouse_engines: SharedClickHouseEngines = Arc::new(RwLock::new(HashMap::new()));
+    let chain_names: SharedChainNames = Arc::new(RwLock::new(HashMap::new()));
     let mut default_chain_id = 0u64;
 
     for chain in &config.chains {
@@ -112,6 +114,10 @@ pub async fn run(args: Args) -> Result<()> {
             None => throttled_pool.pool.clone(),
         };
         pools.write().await.insert(chain.chain_id, api_pool);
+        chain_names
+            .write()
+            .await
+            .insert(chain.chain_id, chain.name.clone());
 
         spawn_sync_engine(
             chain.clone(),
@@ -136,6 +142,7 @@ pub async fn run(args: Args) -> Result<()> {
                 broadcaster.clone(),
                 Arc::clone(&clickhouse_configs),
                 Arc::clone(&clickhouse_engines),
+                Arc::clone(&chain_names),
                 config.http.trusted_cidrs.clone(),
             );
 
@@ -159,6 +166,7 @@ pub async fn run(args: Args) -> Result<()> {
 
         let pools_for_watcher = Arc::clone(&pools);
         let clickhouse_configs_for_watcher = Arc::clone(&clickhouse_configs);
+        let chain_names_for_watcher = Arc::clone(&chain_names);
         let broadcaster_for_watcher = broadcaster.clone();
         let shutdown_tx_for_watcher = shutdown_tx.clone();
 
@@ -179,6 +187,10 @@ pub async fn run(args: Args) -> Result<()> {
                             .write()
                             .await
                             .insert(event.chain.chain_id, api_pool);
+                        chain_names_for_watcher
+                            .write()
+                            .await
+                            .insert(event.chain.chain_id, event.chain.name.clone());
 
                         spawn_sync_engine(
                             event.chain,
@@ -200,6 +212,7 @@ pub async fn run(args: Args) -> Result<()> {
             default_chain_id,
             broadcaster.clone(),
             clickhouse_configs.read().await.clone(),
+            chain_names.read().await.clone(),
             &config.http,
         );
 
