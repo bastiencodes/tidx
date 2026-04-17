@@ -17,7 +17,7 @@
 //! Legacy tokens like MKR/SAI whose `name()`/`symbol()` return `bytes32`
 //! instead of `string` are decoded via a UTF-8 trim-null fallback.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloy::primitives::{Address, Bytes, address};
 use alloy::sol;
@@ -27,6 +27,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::db::Pool;
+use crate::metrics;
 
 use super::fetcher::RpcClient;
 
@@ -106,6 +107,7 @@ impl Erc20MetadataWorker {
         );
 
         let mut consecutive_failures: u32 = 0;
+        metrics::set_erc20_consecutive_failures(self.chain_id, 0);
 
         loop {
             match self.tick().await {
@@ -124,6 +126,7 @@ impl Erc20MetadataWorker {
                     );
                 }
             }
+            metrics::set_erc20_consecutive_failures(self.chain_id, consecutive_failures);
 
             let delay = compute_backoff(consecutive_failures);
             tokio::select! {
@@ -137,6 +140,12 @@ impl Erc20MetadataWorker {
     }
 
     async fn tick(&self) -> Result<()> {
+        // Snapshot the pending backlog for Prometheus. Cheap — the partial
+        // index on resolution_status='pending' keeps this O(pending).
+        if let Ok(pending) = self.pending_count().await {
+            metrics::set_erc20_tokens_pending(self.chain_id, pending);
+        }
+
         // Keep resolving until the pending queue is drained. Lets a cold
         // start backfill quickly without waiting for future ticks.
         let mut total_resolved = 0_usize;
@@ -155,6 +164,19 @@ impl Erc20MetadataWorker {
             );
         }
         Ok(())
+    }
+
+    /// Returns the current count of rows with `resolution_status = 'pending'`
+    /// for this chain. Used to publish the pending-backlog gauge.
+    async fn pending_count(&self) -> Result<i64> {
+        let conn = self.pool.get().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) FROM erc20_tokens WHERE resolution_status = 'pending'",
+                &[],
+            )
+            .await?;
+        Ok(row.get::<_, i64>(0))
     }
 
     // ── Resolution ────────────────────────────────────────────────────────
@@ -211,6 +233,7 @@ impl Erc20MetadataWorker {
                     batch_size = addresses.len(),
                     "Multicall3 batch failed, incrementing attempts"
                 );
+                metrics::record_erc20_batch_error(self.chain_id);
                 self.increment_attempts(&pending).await?;
                 return Err(e);
             }
@@ -224,11 +247,23 @@ impl Erc20MetadataWorker {
             batch.block_timestamp.and_then(|n| i64::try_from(n).ok());
 
         let conn = self.pool.get().await?;
+        let mut ok_count: u64 = 0;
+        let mut partial_count: u64 = 0;
+        let mut failed_count: u64 = 0;
         for (addr, result) in addresses.iter().zip(batch.results.iter()) {
             let status = match (result.name.is_some(), result.symbol.is_some(), result.decimals.is_some()) {
-                (true, true, true) => "ok",
-                (false, false, false) => "failed",
-                _ => "partial",
+                (true, true, true) => {
+                    ok_count += 1;
+                    "ok"
+                }
+                (false, false, false) => {
+                    failed_count += 1;
+                    "failed"
+                }
+                _ => {
+                    partial_count += 1;
+                    "partial"
+                }
             };
             conn.execute(
                 r#"
@@ -255,9 +290,16 @@ impl Erc20MetadataWorker {
             .await?;
         }
 
+        metrics::record_erc20_metadata_resolved(self.chain_id, "ok", ok_count);
+        metrics::record_erc20_metadata_resolved(self.chain_id, "partial", partial_count);
+        metrics::record_erc20_metadata_resolved(self.chain_id, "failed", failed_count);
+
         debug!(
             chain_id = self.chain_id,
             batch = addresses.len(),
+            ok = ok_count,
+            partial = partial_count,
+            failed = failed_count,
             "Resolved Multicall3 batch"
         );
         Ok(addresses.len())
@@ -331,7 +373,9 @@ impl Erc20MetadataWorker {
         let to_hex = format!("0x{}", hex::encode(MULTICALL3_ADDRESS.as_slice()));
         let data_hex = format!("0x{}", hex::encode(&calldata));
 
+        let rpc_start = Instant::now();
         let raw = self.rpc.eth_call(&to_hex, &data_hex).await?;
+        metrics::record_erc20_multicall_duration(self.chain_id, rpc_start.elapsed());
 
         let decoded = IMulticall3::aggregate3Call::abi_decode_returns(&raw)
             .map_err(|e| anyhow!("Failed to decode Multicall3 aggregate3 response: {e}"))?;

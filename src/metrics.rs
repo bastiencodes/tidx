@@ -208,6 +208,71 @@ pub fn record_clickhouse_rows(count: u64) {
     histogram!("tidx_clickhouse_query_rows").record(count as f64);
 }
 
+// ── ERC20 metadata pipeline metrics ──────────────────────────────────
+//
+// Visibility into the two-stage erc20_tokens pipeline:
+// - discovery (sync-time upsert, writer.rs)
+// - resolution (worker, erc20_metadata.rs)
+//
+// Chain-scoped metrics get a `chain_id` label; writer-side discovery
+// matches the sink-metric convention (no chain_id — one-process-per-chain).
+
+/// Counter of rows the sync writer's `ON CONFLICT DO UPDATE` upsert
+/// touched in `erc20_tokens`. In steady-state forward sync this is
+/// effectively the new-token discovery rate; during backfill going
+/// backwards it also includes updates to `first_transfer_*` on already
+/// known addresses (whose first Transfer turned out to be in an earlier
+/// block than previously recorded). Zero-count ticks are not recorded.
+pub fn record_erc20_tokens_discovered(count: u64) {
+    if count == 0 {
+        return;
+    }
+    counter!("tidx_erc20_tokens_discovered_total").increment(count);
+}
+
+/// Counter of `erc20_tokens` rows whose metadata was resolved by the worker
+/// in this batch, labeled by terminal resolution status (`ok` / `partial`
+/// / `failed`).
+pub fn record_erc20_metadata_resolved(chain_id: u64, status: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    let labels = [
+        ("chain_id", chain_id.to_string()),
+        ("status", status.to_string()),
+    ];
+    counter!("tidx_erc20_metadata_resolved_total", &labels).increment(count);
+}
+
+/// Histogram of Multicall3 `aggregate3` call latency per resolution batch.
+pub fn record_erc20_multicall_duration(chain_id: u64, duration: std::time::Duration) {
+    let labels = [("chain_id", chain_id.to_string())];
+    histogram!("tidx_erc20_metadata_multicall_duration_seconds", &labels)
+        .record(duration.as_secs_f64());
+}
+
+/// Counter of Multicall3 batch invocation failures (RPC errors, decode
+/// errors — anything that kept the batch from updating rows).
+pub fn record_erc20_batch_error(chain_id: u64) {
+    let labels = [("chain_id", chain_id.to_string())];
+    counter!("tidx_erc20_metadata_batch_errors_total", &labels).increment(1);
+}
+
+/// Current worker backoff depth (consecutive tick failures). `0` when
+/// healthy; rises with each tick-level error, caps at the max backoff.
+pub fn set_erc20_consecutive_failures(chain_id: u64, failures: u32) {
+    let labels = [("chain_id", chain_id.to_string())];
+    gauge!("tidx_erc20_metadata_consecutive_failures", &labels).set(f64::from(failures));
+}
+
+/// Gauge of current `pending` backlog in `erc20_tokens`. Sampled at the
+/// start of each worker tick — lets operators alert when resolution falls
+/// behind discovery.
+pub fn set_erc20_tokens_pending(chain_id: u64, pending: i64) {
+    let labels = [("chain_id", chain_id.to_string())];
+    gauge!("tidx_erc20_tokens_pending", &labels).set(pending as f64);
+}
+
 // ── Per-sink watermarks (in-memory, no table scans) ──────────────────────
 //
 // Tracks the highest block number written to each table in each sink.

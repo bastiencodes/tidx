@@ -37,8 +37,9 @@ async fn upsert_erc20_tokens_from_staging_logs(
         .topic0;
     let selector_bytes = selector.to_vec();
 
-    tx.execute(
-        r#"
+    let inserted = tx
+        .execute(
+            r#"
         INSERT INTO erc20_tokens (
             address, first_transfer_block, first_transfer_tx_hash, first_transfer_at,
             deployed_block, deployed_tx_hash, deployed_at,
@@ -61,9 +62,11 @@ async fn upsert_erc20_tokens_from_staging_logs(
             first_transfer_at      = EXCLUDED.first_transfer_at
         WHERE EXCLUDED.first_transfer_block < erc20_tokens.first_transfer_block
         "#,
-        &[&selector_bytes],
-    )
-    .await?;
+            &[&selector_bytes],
+        )
+        .await?;
+
+    metrics::record_erc20_tokens_discovered(inserted);
 
     Ok(())
 }
