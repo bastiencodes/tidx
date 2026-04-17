@@ -1,9 +1,4 @@
-# TIDX Indexer Configuration
-#
-# `${VAR}` references are expanded from the process environment at config load
-# time. Keep credentials out of this file: put them in env vars (see
-# `.env.example`, your shell rc, or docker-compose `env_file`). Escape a
-# literal `${VAR}` as `$${VAR}`.
+# tidx — `${VAR}` is expanded from the process env at load time. Escape with `$${VAR}`.
 
 [http]
 enabled = true
@@ -23,15 +18,9 @@ backfill = true
 batch_size = 500
 concurrency = 8
 
-# ClickHouse OLAP engine (optional)
-# Data is written directly via HTTP batch inserts (JSONEachRow).
-# Queries go to the primary; failover instances are tried on connection failure.
 [chains.clickhouse]
 enabled = false
 url = "http://clickhouse:8123"
-# failover_urls = ["http://clickhouse-2:8123"]
-# user = "default"
-# password_env = "CH_PASSWORD"
 
 [[chains]]
 name = "mainnet"
@@ -42,10 +31,6 @@ backfill = true
 batch_size = 500
 concurrency = 8
 
-# ClickHouse OLAP engine (optional)
 [chains.clickhouse]
 enabled = false
 url = "http://clickhouse:8123"
-# failover_urls = ["http://clickhouse-2:8123"]
-# user = "default"
-# password_env = "CH_PASSWORD"
