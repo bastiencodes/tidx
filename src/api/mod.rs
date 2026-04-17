@@ -1,5 +1,6 @@
 mod blocks;
 mod erc20;
+mod pagination;
 mod search;
 mod transactions;
 mod views;

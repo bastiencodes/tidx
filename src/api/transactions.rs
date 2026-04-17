@@ -1,12 +1,15 @@
 //! Transactions endpoints.
 //!
-//! `GET /transactions?chainId=X`                 — newest [`LIST_LIMIT`]
-//!                                                 transactions joined with
-//!                                                 their receipts.
-//! `GET /transactions?chainId=X&block=N`         — all transactions for block
-//!                                                 `N`, ordered by index.
-//! `GET /transactions?chainId=X&address=0x...`   — newest [`LIST_LIMIT`]
-//!                                                 transactions where `address`
+//! All list paths accept keyset pagination via `limit` (clamped to
+//! [`pagination::MAX_LIMIT`], defaulting to [`pagination::DEFAULT_LIMIT`]) and
+//! an opaque `cursor` returned in the response as `next_cursor`. The cursor
+//! shape is path-specific but always opaque to clients.
+//!
+//! `GET /transactions?chainId=X`                 — newest transactions joined
+//!                                                 with their receipts.
+//! `GET /transactions?chainId=X&block=N`         — transactions for block `N`,
+//!                                                 ordered by index.
+//! `GET /transactions?chainId=X&address=0x...`   — transactions where `address`
 //!                                                 is either `from` or `to`.
 //!                                                 Combinable with `block=` to
 //!                                                 scope to a single block.
@@ -18,7 +21,8 @@
 //!                                                 `/blocks?live=true` framing
 //!                                                 (`event: result` / `lagged`
 //!                                                 / `error`). Not compatible
-//!                                                 with `block=` or `address=`.
+//!                                                 with `block=`, `address=`,
+//!                                                 or pagination params.
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -34,14 +38,12 @@ use axum::{
     },
     Json,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::api::{ApiError, AppState};
-
-/// Fixed page size. Not user-selectable for now; revisit when pagination lands.
-const LIST_LIMIT: i64 = 50;
 
 #[derive(Deserialize)]
 pub struct TransactionsParams {
@@ -53,6 +55,34 @@ pub struct TransactionsParams {
     block: Option<u64>,
     #[serde(default)]
     address: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// Cursor for the LATEST path (`ORDER BY block_num DESC, idx DESC`).
+#[derive(Serialize, Deserialize)]
+struct LatestCursor {
+    b: i64,
+    i: i32,
+}
+
+/// Cursor for the BY_BLOCK path (`ORDER BY idx ASC`). Block is fixed so
+/// only `idx` is needed.
+#[derive(Serialize, Deserialize)]
+struct BlockCursor {
+    i: i32,
+}
+
+/// Cursor for the BY_ADDRESS path. We include `ts_ms` so the inner per-leg
+/// scan (indexed on `("from", block_timestamp DESC)`) can range-scan the
+/// index; `(b, i)` break ties within the same block timestamp.
+#[derive(Serialize, Deserialize)]
+struct AddressCursor {
+    ts_ms: i64,
+    b: i64,
+    i: i32,
 }
 
 #[derive(Serialize)]
@@ -84,10 +114,12 @@ pub struct TransactionsResponse {
     ok: bool,
     transactions: Vec<Transaction>,
     count: usize,
+    /// Opaque cursor for the next page, or `null` on the last page.
+    next_cursor: Option<String>,
     query_time_ms: f64,
 }
 
-/// `GET /transactions?chainId=X[&block=N][&address=0x...][&live=true]`
+/// `GET /transactions?chainId=X[&block=N][&address=0x...][&live=true][&limit=N][&cursor=...]`
 pub async fn list_transactions(
     State(state): State<AppState>,
     Query(params): Query<TransactionsParams>,
@@ -102,6 +134,12 @@ pub async fn list_transactions(
         if params.address.is_some() {
             return ApiError::BadRequest(
                 "address filter is not supported with live=true".to_string(),
+            )
+            .into_response();
+        }
+        if params.cursor.is_some() {
+            return ApiError::BadRequest(
+                "cursor is not supported with live=true".to_string(),
             )
             .into_response();
         }
@@ -129,32 +167,119 @@ async fn handle_once(
         .map(|b| i64::try_from(b).map_err(|_| ApiError::BadRequest(format!("block out of range: {b}"))))
         .transpose()?;
     let address_bytes = params.address.as_deref().map(parse_address).transpose()?;
+    let limit = pagination::clamp_limit(params.limit, DEFAULT_LIMIT, MAX_LIMIT);
 
     let start = Instant::now();
-    let rows = match (address_bytes, block_num) {
-        (Some(addr), Some(bn)) => conn
-            .query(&by_address_and_block_sql(), &[&addr, &bn, &LIST_LIMIT])
-            .await
-            .map_err(|e| ApiError::QueryError(e.to_string()))?,
-        (Some(addr), None) => conn
-            .query(&by_address_sql(), &[&addr, &LIST_LIMIT])
-            .await
-            .map_err(|e| ApiError::QueryError(e.to_string()))?,
-        (None, Some(bn)) => conn
-            .query(&by_block_sql(), &[&bn])
-            .await
-            .map_err(|e| ApiError::QueryError(e.to_string()))?,
-        (None, None) => conn
-            .query(&latest_sql(), &[&LIST_LIMIT])
-            .await
-            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+    let (rows, variant) = match (address_bytes, block_num) {
+        (Some(addr), Some(bn)) => {
+            // BY_ADDRESS_AND_BLOCK — outer sort is `idx ASC`, cursor is `{i}`.
+            let cursor_i: i32 = params
+                .cursor
+                .as_deref()
+                .map(pagination::decode::<BlockCursor>)
+                .transpose()?
+                .map_or(-1, |c| c.i);
+            let rows = conn
+                .query(&by_address_and_block_sql(), &[&addr, &bn, &cursor_i, &limit])
+                .await
+                .map_err(|e| ApiError::QueryError(e.to_string()))?;
+            (rows, CursorVariant::BlockIdx)
+        }
+        (Some(addr), None) => {
+            // BY_ADDRESS — outer sort is `(block_num, idx) DESC`, cursor is
+            // `{ts_ms, b, i}` so the inner per-leg scan can seek by index.
+            let rows = match params
+                .cursor
+                .as_deref()
+                .map(pagination::decode::<AddressCursor>)
+                .transpose()?
+            {
+                Some(c) => {
+                    let ts = Utc
+                        .timestamp_millis_opt(c.ts_ms)
+                        .single()
+                        .ok_or_else(|| {
+                            ApiError::BadRequest("invalid cursor: timestamp out of range".into())
+                        })?;
+                    conn.query(&by_address_after_sql(), &[&addr, &ts, &c.b, &c.i, &limit])
+                        .await
+                        .map_err(|e| ApiError::QueryError(e.to_string()))?
+                }
+                None => conn
+                    .query(&by_address_sql(), &[&addr, &limit])
+                    .await
+                    .map_err(|e| ApiError::QueryError(e.to_string()))?,
+            };
+            (rows, CursorVariant::Address)
+        }
+        (None, Some(bn)) => {
+            // BY_BLOCK — outer sort is `idx ASC`, cursor is `{i}`.
+            let cursor_i: i32 = params
+                .cursor
+                .as_deref()
+                .map(pagination::decode::<BlockCursor>)
+                .transpose()?
+                .map_or(-1, |c| c.i);
+            let rows = conn
+                .query(&by_block_sql(), &[&bn, &cursor_i, &limit])
+                .await
+                .map_err(|e| ApiError::QueryError(e.to_string()))?;
+            (rows, CursorVariant::BlockIdx)
+        }
+        (None, None) => {
+            // LATEST — outer sort is `(block_num, idx) DESC`, cursor is `{b, i}`.
+            let rows = match params
+                .cursor
+                .as_deref()
+                .map(pagination::decode::<LatestCursor>)
+                .transpose()?
+            {
+                Some(c) => conn
+                    .query(&latest_after_sql(), &[&c.b, &c.i, &limit])
+                    .await
+                    .map_err(|e| ApiError::QueryError(e.to_string()))?,
+                None => conn
+                    .query(&latest_sql(), &[&limit])
+                    .await
+                    .map_err(|e| ApiError::QueryError(e.to_string()))?,
+            };
+            (rows, CursorVariant::Latest)
+        }
     };
 
     let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
     let count = transactions.len();
+    let next_cursor = next_cursor_for(&transactions, limit, variant);
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok(Json(TransactionsResponse { ok: true, transactions, count, query_time_ms }))
+    Ok(Json(TransactionsResponse { ok: true, transactions, count, next_cursor, query_time_ms }))
+}
+
+/// Which cursor shape this query path emits when it fills a page.
+#[derive(Clone, Copy)]
+enum CursorVariant {
+    Latest,
+    BlockIdx,
+    Address,
+}
+
+fn next_cursor_for(txs: &[Transaction], limit: i64, variant: CursorVariant) -> Option<String> {
+    if (txs.len() as i64) < limit {
+        return None;
+    }
+    let last = txs.last()?;
+    Some(match variant {
+        CursorVariant::Latest => pagination::encode(&LatestCursor {
+            b: last.block_number,
+            i: last.transaction_index,
+        }),
+        CursorVariant::BlockIdx => pagination::encode(&BlockCursor { i: last.transaction_index }),
+        CursorVariant::Address => pagination::encode(&AddressCursor {
+            ts_ms: last.block_timestamp_ms,
+            b: last.block_number,
+            i: last.transaction_index,
+        }),
+    })
 }
 
 /// Column list shared by all transaction queries. Must match `row_to_tx` positions.
@@ -193,7 +318,43 @@ fn latest_sql() -> String {
     )
 }
 
+/// Cursor variant of LATEST: `(block_num, idx) < ($1, $2)` pushes the keyset
+/// filter down into `idx_txs_block_num`'s range scan.
+fn latest_after_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
+    FROM txs t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    WHERE (t.block_num, t.idx) < ($1, $2)
+    ORDER BY t.block_num DESC, t.idx DESC
+    LIMIT $3
+"#
+    )
+}
+
+/// BY_BLOCK paginated: `idx > $2` handles keyset pagination (cursor defaults
+/// to -1 on first page so `idx > -1` admits every row in the block).
 fn by_block_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
+    FROM txs t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    WHERE t.block_num = $1 AND t.idx > $2
+    ORDER BY t.idx ASC
+    LIMIT $3
+"#
+    )
+}
+
+/// Unbounded BY_BLOCK used by the live SSE push: each per-block event
+/// delivers *all* txs in that block, not a page.
+fn by_block_all_sql() -> String {
     format!(
         r#"
     SELECT {TX_COLS}
@@ -229,20 +390,56 @@ fn by_address_sql() -> String {
     )
 }
 
+/// Cursor variant of BY_ADDRESS. Inner predicate
+/// `(block_timestamp, block_num, idx) < ...` lets the index scan seek past
+/// already-returned rows; tuple comparison handles within-block ties (all
+/// rows in a block share block_timestamp).
+fn by_address_after_sql() -> String {
+    format!(
+        r#"
+    SELECT {TX_COLS}
+    FROM (
+        (SELECT * FROM txs
+           WHERE "from" = $1
+             AND (block_timestamp, block_num, idx) < ($2, $3, $4)
+           ORDER BY block_timestamp DESC LIMIT $5)
+        UNION ALL
+        (SELECT * FROM txs
+           WHERE "to" = $1
+             AND (block_timestamp, block_num, idx) < ($2, $3, $4)
+           ORDER BY block_timestamp DESC LIMIT $5)
+    ) t
+    LEFT JOIN receipts r
+      ON r.tx_hash = t.hash
+     AND r.block_num = t.block_num
+    ORDER BY t.block_num DESC, t.idx DESC
+    LIMIT $5
+"#
+    )
+}
+
+/// BY_ADDRESS_AND_BLOCK: block is fixed, so the inner legs have at most
+/// ~O(txs per block per address) rows (tiny). We order by `idx ASC` directly
+/// rather than `block_timestamp` (constant within a block) and apply the
+/// cursor on `idx`.
 fn by_address_and_block_sql() -> String {
     format!(
         r#"
     SELECT {TX_COLS}
     FROM (
-        (SELECT * FROM txs WHERE "from" = $1 AND block_num = $2 ORDER BY block_timestamp DESC LIMIT $3)
+        (SELECT * FROM txs
+           WHERE "from" = $1 AND block_num = $2 AND idx > $3
+           ORDER BY idx ASC LIMIT $4)
         UNION ALL
-        (SELECT * FROM txs WHERE "to" = $1 AND block_num = $2 ORDER BY block_timestamp DESC LIMIT $3)
+        (SELECT * FROM txs
+           WHERE "to" = $1 AND block_num = $2 AND idx > $3
+           ORDER BY idx ASC LIMIT $4)
     ) t
     LEFT JOIN receipts r
       ON r.tx_hash = t.hash
      AND r.block_num = t.block_num
     ORDER BY t.idx ASC
-    LIMIT $3
+    LIMIT $4
 "#
     )
 }
@@ -331,13 +528,17 @@ async fn handle_live(
                     return;
                 }
             };
-            match conn.query(&latest_sql(), &[&LIST_LIMIT]).await {
+            match conn.query(&latest_sql(), &[&DEFAULT_LIMIT]).await {
                 Ok(rows) => {
                     let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
                     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    let resp = TransactionsResponse { ok: true, transactions, count, query_time_ms };
+                    // Live snapshots omit pagination; the SSE stream itself
+                    // is the forward traversal mechanism.
+                    let resp = TransactionsResponse {
+                        ok: true, transactions, count, next_cursor: None, query_time_ms,
+                    };
                     yield Ok(SseEvent::default()
                         .event("result")
                         .json_data(resp)
@@ -393,7 +594,7 @@ async fn handle_live(
 
                     for block_num in effective_start..=end {
                         let qstart = Instant::now();
-                        match conn.query(&by_block_sql(), &[&block_num]).await {
+                        match conn.query(&by_block_all_sql(), &[&block_num]).await {
                             Ok(rows) => {
                                 let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
                                 let count = transactions.len();
@@ -401,6 +602,7 @@ async fn handle_live(
                                     ok: true,
                                     transactions,
                                     count,
+                                    next_cursor: None,
                                     query_time_ms: qstart.elapsed().as_secs_f64() * 1000.0,
                                 };
                                 yield Ok(SseEvent::default()

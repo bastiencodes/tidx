@@ -1,11 +1,16 @@
 //! Blocks endpoints.
 //!
-//! `GET /blocks?chainId=X`                  — newest [`LIST_LIMIT`] blocks from the
-//!                                            `blocks` table.
+//! `GET /blocks?chainId=X`                  — newest [`pagination::DEFAULT_LIMIT`] blocks
+//!                                            from the `blocks` table. Supports keyset
+//!                                            pagination via `limit` (clamped to
+//!                                            [`pagination::MAX_LIMIT`]) and an opaque
+//!                                            `cursor` returned as `next_cursor`.
 //! `GET /blocks?chainId=X&live=true`       — SSE stream: initial snapshot, then one
 //!                                            event per newly indexed block. Mirrors
 //!                                            the `/query?live=true` framing
 //!                                            (`event: result` / `lagged` / `error`).
+//!                                            Pagination params are ignored in live
+//!                                            mode.
 //! `GET /blocks/:identifier?chainId=X`      — single block by decimal number or
 //!                                            0x-prefixed 32-byte hash.
 
@@ -24,10 +29,17 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::api::pagination;
 use crate::api::{ApiError, AppState};
 
-/// Fixed page size. Not user-selectable for now; revisit when pagination lands.
-const LIST_LIMIT: i64 = 20;
+use pagination::{DEFAULT_LIMIT, MAX_LIMIT};
+
+/// Keyset cursor for `/blocks` — the number of the last block returned on the
+/// previous page. Next page is `num < cursor.n`.
+#[derive(Serialize, Deserialize)]
+struct BlocksCursor {
+    n: i64,
+}
 
 #[derive(Deserialize)]
 pub struct BlocksParams {
@@ -35,6 +47,10 @@ pub struct BlocksParams {
     chain_id: u64,
     #[serde(default)]
     live: bool,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -51,6 +67,8 @@ pub struct BlocksResponse {
     ok: bool,
     blocks: Vec<Block>,
     count: usize,
+    /// Opaque cursor for the next page, or `null` on the last page.
+    next_cursor: Option<String>,
     query_time_ms: f64,
 }
 
@@ -79,17 +97,31 @@ async fn handle_once(
         .await
         .map_err(|e| ApiError::Internal(format!("Pool error: {e}")))?;
 
+    let limit = pagination::clamp_limit(params.limit, DEFAULT_LIMIT, MAX_LIMIT);
+    let cursor: Option<BlocksCursor> = params
+        .cursor
+        .as_deref()
+        .map(pagination::decode)
+        .transpose()?;
+
     let start = Instant::now();
-    let rows = conn
-        .query(LIST_SQL, &[&LIST_LIMIT])
-        .await
-        .map_err(|e| ApiError::QueryError(e.to_string()))?;
+    let rows = match cursor {
+        Some(c) => conn
+            .query(LIST_AFTER_SQL, &[&c.n, &limit])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+        None => conn
+            .query(LIST_SQL, &[&limit])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?,
+    };
 
     let blocks: Vec<Block> = rows.iter().map(row_to_block).collect();
     let count = blocks.len();
+    let next_cursor = next_cursor_for(&blocks, limit);
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    Ok(Json(BlocksResponse { ok: true, blocks, count, query_time_ms }))
+    Ok(Json(BlocksResponse { ok: true, blocks, count, next_cursor, query_time_ms }))
 }
 
 const LIST_SQL: &str = r#"
@@ -102,6 +134,29 @@ const LIST_SQL: &str = r#"
     ORDER BY b.num DESC
     LIMIT $1
 "#;
+
+const LIST_AFTER_SQL: &str = r#"
+    SELECT
+        b.num,
+        b.hash,
+        b.timestamp_ms / 1000,
+        (SELECT COUNT(*) FROM txs t WHERE t.block_num = b.num)
+    FROM blocks b
+    WHERE b.num < $1
+    ORDER BY b.num DESC
+    LIMIT $2
+"#;
+
+/// `Some(cursor)` only when the page filled — i.e. more rows likely exist.
+/// A short page means we've hit the end, so `next_cursor` is `None`.
+fn next_cursor_for(blocks: &[Block], limit: i64) -> Option<String> {
+    if (blocks.len() as i64) < limit {
+        return None;
+    }
+    blocks
+        .last()
+        .map(|b| pagination::encode(&BlocksCursor { n: b.number }))
+}
 
 fn row_to_block(row: &tokio_postgres::Row) -> Block {
     let hash: Vec<u8> = row.get(1);
@@ -151,12 +206,14 @@ async fn handle_live(
                     return;
                 }
             };
-            match conn.query(LIST_SQL, &[&LIST_LIMIT]).await {
+            match conn.query(LIST_SQL, &[&DEFAULT_LIMIT]).await {
                 Ok(rows) => {
                     let blocks: Vec<Block> = rows.iter().map(row_to_block).collect();
                     let count = blocks.len();
                     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
-                    BlocksResponse { ok: true, blocks, count, query_time_ms }
+                    // Live snapshots omit pagination; the stream delivers
+                    // subsequent blocks push-style, not via cursor.
+                    BlocksResponse { ok: true, blocks, count, next_cursor: None, query_time_ms }
                 }
                 Err(e) => {
                     yield Ok(SseEvent::default()
@@ -198,6 +255,7 @@ async fn handle_live(
                         ok: true,
                         blocks: vec![block],
                         count: 1,
+                        next_cursor: None,
                         query_time_ms: start.elapsed().as_secs_f64() * 1000.0,
                     };
                     yield Ok(SseEvent::default()

@@ -5,10 +5,19 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-use crate::api::{AppState, ApiError};
+use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
+use crate::api::{ApiError, AppState};
 
 /// ERC20 Transfer(address,address,uint256) topic0
 const TRANSFER_SELECTOR: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// Keyset cursor: the `(block_num, log_idx)` of the last row on the previous
+/// page.
+#[derive(Serialize, Deserialize)]
+struct TransfersCursor {
+    b: i64,
+    l: i32,
+}
 
 #[derive(Deserialize)]
 pub struct TransferParams {
@@ -19,6 +28,10 @@ pub struct TransferParams {
     direction: Option<String>,
     #[serde(alias = "chain_id", rename = "chainId")]
     chain_id: u64,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -37,10 +50,12 @@ pub struct TransfersResponse {
     ok: bool,
     transfers: Vec<TransferEntry>,
     count: usize,
+    /// Opaque cursor for the next page, or `null` on the last page.
+    next_cursor: Option<String>,
     query_time_ms: f64,
 }
 
-/// GET /transfers?address=0x...&direction=in&chainId=1
+/// GET /erc20/transfers?address=0x...&direction=in&chainId=1[&limit=N][&cursor=...]
 pub async fn list_transfers(
     State(state): State<AppState>,
     Query(params): Query<TransferParams>,
@@ -65,6 +80,16 @@ pub async fn list_transfers(
         ApiError::BadRequest(format!("Unknown chainId: {}", params.chain_id))
     })?;
 
+    let limit = pagination::clamp_limit(params.limit, DEFAULT_LIMIT, MAX_LIMIT);
+    let cursor: Option<TransfersCursor> = params
+        .cursor
+        .as_deref()
+        .map(pagination::decode)
+        .transpose()?;
+    // Sentinel (MAX, MAX) admits every real row when no cursor is supplied,
+    // keeping the query shape identical across first / subsequent pages.
+    let (cb, cl) = cursor.as_ref().map_or((i64::MAX, i32::MAX), |c| (c.b, c.l));
+
     // Build address filter based on direction
     let address_filter = match params.direction.as_deref() {
         Some("in") => format!("AND topic2 = '\\x{padded}'"),
@@ -79,12 +104,14 @@ pub async fn list_transfers(
             address,
             abi_address(topic1) AS "from",
             abi_address(topic2) AS "to",
-            abi_uint(substring(data FROM 1 FOR 32)) AS value
+            abi_uint(substring(data FROM 1 FOR 32)) AS value,
+            log_idx
         FROM logs
         WHERE selector = '\x{TRANSFER_SELECTOR}'
             {address_filter}
+            AND (block_num, log_idx) < ($1, $2)
         ORDER BY block_num DESC, log_idx DESC
-        LIMIT 100"#
+        LIMIT $3"#
     );
 
     let conn = pool
@@ -99,7 +126,7 @@ pub async fn list_transfers(
     let start = Instant::now();
     let rows = tokio::time::timeout(
         std::time::Duration::from_millis(5100),
-        conn.query(&sql, &[]),
+        conn.query(&sql, &[&cb, &cl, &limit]),
     )
     .await
     .map_err(|_| ApiError::Timeout)?
@@ -114,6 +141,16 @@ pub async fn list_transfers(
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let addr_lower = params.address.to_lowercase();
+
+    let next_cursor = if (rows.len() as i64) < limit {
+        None
+    } else {
+        rows.last().map(|row| {
+            let block_num: i64 = row.get(0);
+            let log_idx: i32 = row.get(6);
+            pagination::encode(&TransfersCursor { b: block_num, l: log_idx })
+        })
+    };
 
     let transfers: Vec<TransferEntry> = rows
         .iter()
@@ -151,6 +188,7 @@ pub async fn list_transfers(
         ok: true,
         transfers,
         count,
+        next_cursor,
         query_time_ms,
     }))
 }
