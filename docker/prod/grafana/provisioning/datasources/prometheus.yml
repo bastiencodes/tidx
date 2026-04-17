@@ -4,6 +4,14 @@
 
 apiVersion: 1
 
+# Drop any pre-existing data source with this name before provisioning the
+# new one. Handles the case where Grafana already has a Prometheus data
+# source with an auto-generated UID from an earlier provisioning pass —
+# the provisioner can't update the UID in place, so we delete then recreate.
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
 datasources:
   - name: Prometheus
     # Deterministic UID so dashboards can reference this data source by a
