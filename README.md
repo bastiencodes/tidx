@@ -33,6 +33,7 @@
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [HTTP API](#http-api)
+- [Decoding](#decoding)
 - [Database Schema](#database-schema)
 - [Sync Architecture](#sync-architecture)
 - [Development](#development)
@@ -180,6 +181,7 @@ pg_password_env = "TIDX_PG_PASSWORD"
 ├── pg_password_env         string    (optional)     Env var name for PostgreSQL password
 ├── api_pg_url              string    (optional)     Separate PostgreSQL URL for API (e.g., read replica)
 ├── api_pg_password_env     string    (optional)     Env var name for API PostgreSQL password
+├── decode                  bool      = false        Enable Sourcify signature cache for this chain (see Decoding)
 ├── batch_size              u64       = 100          Blocks per RPC batch request
 └── [clickhouse]                                     ClickHouse OLAP settings
     ├── enabled             bool      = false        Enable ClickHouse OLAP queries
@@ -465,6 +467,26 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
 
+## Decoding
+
+Resolves function selectors and event topic0s to canonical text signatures
+(e.g. `0xa9059cbb` → `transfer(address,uint256)`) from a local mirror of
+[Sourcify's Parquet export](https://docs.sourcify.dev/docs/repository/download-dataset/).
+Opt-in per chain via `decode = true` (~1.68 GB storage as of April 2026).
+
+Load and refresh with:
+
+```bash
+tidx seed-signatures --config config.toml
+```
+
+Requires `aws` and `duckdb` on `PATH`. `aws s3 sync` is incremental — daily
+refreshes typically transfer tens of MB. Schedule nightly via cron:
+
+```
+0 3 * * *   cd /app && tidx seed-signatures --config config.toml
+```
+
 ## Schemas
 
 All tables use composite primary keys with timestamps for efficient range queries:
@@ -596,6 +618,7 @@ make down              Stop all services
 make logs              Tail indexer logs
 make build             Build Docker image
 make seed              Generate transactions
+make seed-signatures   Load Sourcify signature cache (see Decoding)
 
 make bench             Run benchmarks
 make check             Run clippy lints

@@ -6159,6 +6159,7 @@ dependencies = [
  "async-stream",
  "axum",
  "base64",
+ "bytes",
  "chrono",
  "clap",
  "clickhouse",

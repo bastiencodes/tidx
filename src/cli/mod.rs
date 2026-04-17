@@ -1,6 +1,7 @@
 pub mod backfill_receipt_data;
 pub mod init;
 pub mod query;
+pub mod seed_signatures;
 pub mod status;
 pub mod up;
 pub mod upgrade;
@@ -31,6 +32,8 @@ pub enum Commands {
     Views(views::Args),
     /// Backfill txs.gas_used from receipts
     BackfillReceiptData(backfill_receipt_data::Args),
+    /// Load Sourcify signature cache into per-chain databases
+    SeedSignatures(seed_signatures::Args),
     /// Update tidx to the latest version
     Upgrade,
 }

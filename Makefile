@@ -1,4 +1,4 @@
-.PHONY: help up down logs seed build check test bench bench-gen bench-open clean
+.PHONY: help up down logs seed seed-heavy seed-signatures build check test bench bench-gen bench-open clean
 
 .DEFAULT_GOAL := help
 
@@ -67,6 +67,13 @@ seed-heavy:
 		--tip20-weight 3 \
 		--erc20-weight 2 \
 		--swap-weight 2
+
+# Load Sourcify signature cache into every chain's Postgres DB, using pg_url
+# from config.toml. Shells out to aws (s3 sync) + duckdb (parquet → CSV) then
+# streams the CSV into each chain via COPY. ~420 MB download, ~8M rows × N chains.
+CONFIG ?= config.toml
+seed-signatures:
+	@cargo run --release --quiet -- seed-signatures --config $(CONFIG)
 
 # ============================================================================
 # Build & Test
@@ -287,6 +294,7 @@ help:
 	@echo ""
 	@echo "  make seed              Generate transactions (DURATION=30 TPS=100)"
 	@echo "  make seed-heavy        Generate ~1M+ txs with max variance"
+	@echo "  make seed-signatures   Load Sourcify signature cache (~420 MB)"
 	@echo ""
 	@echo "  make bench             Run benchmarks (restores from artifact)"
 	@echo "  make bench-gen         Generate 5M tx seed artifact (run once)"
