@@ -1,5 +1,6 @@
 mod blocks;
 mod erc20;
+mod search;
 mod transactions;
 mod views;
 
@@ -183,6 +184,7 @@ fn build_router(state: AppState) -> Router<()> {
         .route("/erc20/approvals", get(erc20::approvals::list_approvals))
         .route("/erc20/tokens", get(erc20::tokens::list_tokens))
         .route("/erc20/transfers", get(erc20::transfers::list_transfers))
+        .route("/search", get(search::search))
         .route("/views", get(views::list_views).post(views::create_view))
         .route("/views/{name}", get(views::get_view).delete(views::delete_view))
         .layer(cors)
