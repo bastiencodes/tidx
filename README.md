@@ -139,8 +139,9 @@ port = 9090
 [[chains]]
 name = "mainnet"
 chain_id = 4217
-# Full RPC URL lives in the env var — keeps credentials out of the config file.
-rpc_url_env = "TIDX_RPC_URL_MAINNET"
+# `${VAR}` is expanded from the process env at config load time — keeps
+# credentials (basic-auth, API keys in path) out of the committed file.
+rpc_url = "${TIDX_RPC_URL_MAINNET}"
 pg_url = "postgres://user@tidx.example.com:5432/tidx_mainnet"
 pg_password_env = "TIDX_PG_PASSWORD"  # Password from environment variable
 batch_size = 100
@@ -174,8 +175,7 @@ pg_password_env = "TIDX_PG_PASSWORD"
 [[chains]]                                         Chain configuration 
 ├── name                    string    (required)     Display name for logging
 ├── chain_id                u64       (required)     Chain ID
-├── rpc_url                 string    (optional)     JSON-RPC endpoint URL (inline)
-├── rpc_url_env             string    (optional)     Env var name holding the full RPC URL (takes precedence over `rpc_url`)
+├── rpc_url                 string    (required)     JSON-RPC endpoint URL (supports `${VAR}` env-var interpolation)
 ├── pg_url                  string    (required)     PostgreSQL connection string
 ├── pg_password_env         string    (optional)     Env var name for PostgreSQL password
 ├── api_pg_url              string    (optional)     Separate PostgreSQL URL for API (e.g., read replica)

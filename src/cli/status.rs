@@ -176,21 +176,7 @@ async fn print_status(config: &Config) -> Result<()> {
     println!();
 
     for chain in &config.chains {
-        let rpc_url = match chain.resolved_rpc_url() {
-            Ok(url) => url,
-            Err(e) => {
-                println!(
-                    "┌─ {} (chain_id: {}) ─────────────────────",
-                    chain.name, chain.chain_id
-                );
-                println!("│  Status: Failed to resolve rpc_url");
-                println!("│  Error: {e}");
-                println!("└───────────────────────────────────────────────────────────");
-                println!();
-                continue;
-            }
-        };
-        let rpc = RpcClient::new(&rpc_url);
+        let rpc = RpcClient::new(&chain.rpc_url);
         let live_head = rpc.latest_block_number().await.ok();
 
         println!(
@@ -263,10 +249,10 @@ async fn print_json_status(config: &Config) -> Result<()> {
     let mut chains = Vec::new();
 
     for chain in &config.chains {
-        let live_head = match chain.resolved_rpc_url() {
-            Ok(url) => RpcClient::new(&url).latest_block_number().await.ok(),
-            Err(_) => None,
-        };
+        let live_head = RpcClient::new(&chain.rpc_url)
+            .latest_block_number()
+            .await
+            .ok();
 
         let (state, gaps) = match chain.resolved_pg_url() {
             Ok(pg_url) => match db::create_pool(&pg_url).await {
@@ -287,12 +273,10 @@ async fn print_json_status(config: &Config) -> Result<()> {
             .collect();
         let total_gap_blocks: u64 = gaps.iter().map(|(s, e)| e - s + 1).sum();
 
-        // Resolved RPC URL may contain credentials (basic-auth or API key in
-        // path), so surface only the host in JSON output.
-        let rpc_host = chain
-            .resolved_rpc_url()
+        // rpc_url may contain credentials (basic-auth or API key in path), so
+        // surface only the host in JSON output.
+        let rpc_host = url::Url::parse(&chain.rpc_url)
             .ok()
-            .and_then(|u| url::Url::parse(&u).ok())
             .and_then(|u| u.host_str().map(String::from));
 
         let mut chain_status = serde_json::json!({

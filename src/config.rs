@@ -94,18 +94,10 @@ pub struct ChainConfig {
     /// Chain ID
     pub chain_id: u64,
 
-    /// RPC URL. Optional when `rpc_url_env` is set (env var takes precedence).
-    /// Leave unset to keep the full URL out of the config file entirely.
-    #[serde(default)]
-    pub rpc_url: Option<String>,
-
-    /// Environment variable name containing the full RPC URL for this chain.
-    /// When set, the URL is read from this env var at startup; `rpc_url` is
-    /// ignored. Use this to keep credentials (basic-auth or API-key-in-path)
-    /// out of the config file. Exactly one of `rpc_url` / `rpc_url_env` must
-    /// resolve to a non-empty value.
-    #[serde(default)]
-    pub rpc_url_env: Option<String>,
+    /// RPC URL. Supports `${VAR}` env-var interpolation (resolved at config
+    /// load time). Use e.g. `rpc_url = "${TIDX_RPC_URL_MAINNET}"` to keep
+    /// credentials out of the config file.
+    pub rpc_url: String,
 
     /// Database connection URL for this chain.
     /// If `pg_password_env` is set, the password in this URL will be replaced
@@ -235,29 +227,6 @@ fn default_backfill() -> bool {
 }
 
 impl ChainConfig {
-    /// Returns the RPC URL, preferring `rpc_url_env` over `rpc_url`.
-    /// Errors if `rpc_url_env` is set but the variable is missing/empty, or
-    /// if neither `rpc_url_env` nor `rpc_url` provides a value.
-    pub fn resolved_rpc_url(&self) -> Result<String> {
-        if let Some(env_var) = &self.rpc_url_env {
-            let value = std::env::var(env_var).with_context(|| {
-                format!("rpc_url_env '{env_var}' is set but environment variable not found")
-            })?;
-            if value.is_empty() {
-                anyhow::bail!("rpc_url_env '{env_var}' is set but environment variable is empty");
-            }
-            return Ok(value);
-        }
-
-        match &self.rpc_url {
-            Some(url) if !url.is_empty() => Ok(url.clone()),
-            _ => anyhow::bail!(
-                "chain '{}' has no rpc_url (set either `rpc_url` or `rpc_url_env`)",
-                self.name
-            ),
-        }
-    }
-
     /// Returns the PostgreSQL connection URL with password resolved from environment if configured.
     /// If `pg_password_env` is set, replaces the password in `pg_url` with the env var value.
     pub fn resolved_pg_url(&self) -> Result<String> {
@@ -318,7 +287,11 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        let config: Config = toml::from_str(&content)
+        let expanded = expand_env_vars(&content).with_context(|| {
+            format!("Failed to expand env vars in config file: {}", path.display())
+        })?;
+
+        let config: Config = toml::from_str(&expanded)
             .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
 
         if config.chains.is_empty() {
@@ -327,6 +300,53 @@ impl Config {
 
         Ok(config)
     }
+}
+
+/// Expand `${VAR}` references in a config string using process env vars.
+/// Variable names must match `[A-Za-z_][A-Za-z0-9_]*`. Returns an error if
+/// any referenced variable is unset. A literal `$${VAR}` escapes to `${VAR}`.
+fn expand_env_vars(input: &str) -> Result<String> {
+    // regex-lite is already a dep; use it to keep the parser trivial.
+    let re = regex_lite::Regex::new(r"\$(\$?)\{([A-Za-z_][A-Za-z0-9_]*)\}")
+        .expect("static regex compiles");
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut out = String::with_capacity(input.len());
+    let mut last = 0;
+
+    for caps in re.captures_iter(input) {
+        let m = caps.get(0).unwrap();
+        out.push_str(&input[last..m.start()]);
+
+        let escape = caps.get(1).map(|g| !g.as_str().is_empty()).unwrap_or(false);
+        let name = caps.get(2).unwrap().as_str();
+
+        if escape {
+            // `$${VAR}` → literal `${VAR}`
+            out.push('$');
+            out.push('{');
+            out.push_str(name);
+            out.push('}');
+        } else {
+            match std::env::var(name) {
+                Ok(v) => out.push_str(&v),
+                Err(_) => missing.push(name.to_string()),
+            }
+        }
+        last = m.end();
+    }
+    out.push_str(&input[last..]);
+
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        anyhow::bail!(
+            "config references unset environment variable(s): {}",
+            missing.join(", ")
+        );
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -433,8 +453,7 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: Some("http://localhost:8545".to_string()),
-            rpc_url_env: None,
+            rpc_url: "http://localhost:8545".to_string(),
             pg_url: "postgres://user:pass@localhost/db".to_string(),
             pg_password_env: None,
             backfill: true,
@@ -459,8 +478,7 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: Some("http://localhost:8545".to_string()),
-            rpc_url_env: None,
+            rpc_url: "http://localhost:8545".to_string(),
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("PATH".to_string()),
             backfill: true,
@@ -479,61 +497,56 @@ mod tests {
         assert!(!resolved.contains("placeholder"));
     }
 
-    fn rpc_test_chain(rpc_url: Option<&str>, rpc_url_env: Option<&str>) -> ChainConfig {
-        ChainConfig {
-            name: "test".to_string(),
-            chain_id: 1,
-            rpc_url: rpc_url.map(String::from),
-            rpc_url_env: rpc_url_env.map(String::from),
-            pg_url: "postgres://localhost/db".to_string(),
-            pg_password_env: None,
-            backfill: true,
-            batch_size: 100,
-            concurrency: 4,
-            backfill_first: false,
-            trust_rpc: false,
-            api_pg_url: None,
-            api_pg_password_env: None,
-            clickhouse: None,
-        }
+    #[test]
+    fn test_expand_env_vars_substitutes() {
+        // PATH is always set.
+        let path = std::env::var("PATH").unwrap();
+        let out = expand_env_vars("prefix=${PATH}=suffix").unwrap();
+        assert_eq!(out, format!("prefix={path}=suffix"));
     }
 
     #[test]
-    fn test_resolved_rpc_url_inline() {
-        let config = rpc_test_chain(Some("https://eng:pass@rpc.example.com"), None);
-        assert_eq!(
-            config.resolved_rpc_url().unwrap(),
-            "https://eng:pass@rpc.example.com"
-        );
+    fn test_expand_env_vars_multiple_refs() {
+        let path = std::env::var("PATH").unwrap();
+        let out = expand_env_vars("${PATH}-${PATH}").unwrap();
+        assert_eq!(out, format!("{path}-{path}"));
     }
 
     #[test]
-    fn test_resolved_rpc_url_from_env() {
-        // PATH is always set, use it to test env-var sourcing
-        let config = rpc_test_chain(None, Some("PATH"));
-        let resolved = config.resolved_rpc_url().unwrap();
-        assert_eq!(resolved, std::env::var("PATH").unwrap());
+    fn test_expand_env_vars_no_refs() {
+        let out = expand_env_vars("no refs at all, just a $ and a {").unwrap();
+        assert_eq!(out, "no refs at all, just a $ and a {");
     }
 
     #[test]
-    fn test_resolved_rpc_url_env_takes_precedence() {
-        // When both are set, env var wins.
-        let config = rpc_test_chain(Some("https://inline.example.com"), Some("PATH"));
-        let resolved = config.resolved_rpc_url().unwrap();
-        assert_eq!(resolved, std::env::var("PATH").unwrap());
+    fn test_expand_env_vars_missing_errors() {
+        let err = expand_env_vars("${DEFINITELY_NOT_SET_XYZ_999}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("DEFINITELY_NOT_SET_XYZ_999"), "got: {err}");
     }
 
     #[test]
-    fn test_resolved_rpc_url_missing_env() {
-        let config = rpc_test_chain(None, Some("NONEXISTENT_VAR_XYZ_999"));
-        assert!(config.resolved_rpc_url().is_err());
+    fn test_expand_env_vars_reports_all_missing() {
+        let err = expand_env_vars("${MISSING_A_XYZ_999} and ${MISSING_B_XYZ_999}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MISSING_A_XYZ_999"), "got: {err}");
+        assert!(err.contains("MISSING_B_XYZ_999"), "got: {err}");
     }
 
     #[test]
-    fn test_resolved_rpc_url_neither_set() {
-        let config = rpc_test_chain(None, None);
-        let err = config.resolved_rpc_url().unwrap_err().to_string();
-        assert!(err.contains("no rpc_url"), "got: {err}");
+    fn test_expand_env_vars_escape() {
+        // `$${VAR}` is a literal, not an env lookup — no error even if VAR unset.
+        let out = expand_env_vars("literal=$${NOT_SET_XYZ_999}").unwrap();
+        assert_eq!(out, "literal=${NOT_SET_XYZ_999}");
+    }
+
+    #[test]
+    fn test_expand_env_vars_ignores_plain_dollar() {
+        // Only `${VAR}` (with braces) is a reference; bare `$VAR` is untouched.
+        let out = expand_env_vars("cost $5 and $PATH literal").unwrap();
+        assert_eq!(out, "cost $5 and $PATH literal");
     }
 
     #[test]
@@ -541,8 +554,7 @@ mod tests {
         let config = ChainConfig {
             name: "test".to_string(),
             chain_id: 1,
-            rpc_url: Some("http://localhost:8545".to_string()),
-            rpc_url_env: None,
+            rpc_url: "http://localhost:8545".to_string(),
             pg_url: "postgres://user:placeholder@localhost/db".to_string(),
             pg_password_env: Some("NONEXISTENT_VAR_XYZ_999".to_string()),
             backfill: true,

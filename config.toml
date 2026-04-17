@@ -1,8 +1,9 @@
 # TIDX Indexer Configuration
 #
-# RPC URLs (including any embedded credentials) live in env vars — see
-# `.env.example`. Copy it to `.env`, fill in the real URLs, and export them
-# before running `tidx up` (or let docker-compose load the file).
+# `${VAR}` references are expanded from the process environment at config load
+# time. Keep credentials out of this file: put them in env vars (see
+# `.env.example`, your shell rc, or docker-compose `env_file`). Escape a
+# literal `${VAR}` as `$${VAR}`.
 
 [http]
 enabled = true
@@ -16,7 +17,7 @@ port = 9090
 [[chains]]
 name = "moderato"
 chain_id = 42431
-rpc_url_env = "TIDX_RPC_URL_MODERATO"
+rpc_url = "${TIDX_RPC_URL_MODERATO}"
 pg_url = "postgres://tidx:tidx@postgres:5432/tidx_moderato"
 backfill = true
 batch_size = 500
@@ -35,7 +36,7 @@ url = "http://clickhouse:8123"
 [[chains]]
 name = "mainnet"
 chain_id = 4217
-rpc_url_env = "TIDX_RPC_URL_MAINNET"
+rpc_url = "${TIDX_RPC_URL_MAINNET}"
 pg_url = "postgres://tidx:tidx@postgres:5432/tidx_mainnet"
 backfill = true
 batch_size = 500
