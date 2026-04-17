@@ -1,4 +1,4 @@
-.PHONY: help up down logs seed build check test bench bench-gen bench-open clean
+.PHONY: help up down logs seed build check test bench bench-gen bench-open clean dev
 
 .DEFAULT_GOAL := help
 
@@ -15,6 +15,15 @@ endif
 DURATION ?= 30
 TPS ?= 100
 
+# Per-worktree port allocation for `make dev`.
+# Derive a stable offset (0–899) from the worktree directory name so concurrent
+# worktrees don't collide. Base ports 18080/19090 avoid the docker-compose
+# tidx container's 8080/9090.
+WORKTREE := $(shell basename $(CURDIR))
+PORT_OFFSET := $(shell echo -n "$(WORKTREE)" | cksum | awk '{print $$1 % 900}')
+DEV_HTTP_PORT := $(shell expr 18080 + $(PORT_OFFSET))
+DEV_PROM_PORT := $(shell expr 19090 + $(PORT_OFFSET))
+
 # ============================================================================
 # Environment
 # ============================================================================
@@ -27,6 +36,19 @@ ifeq ($(LOCALNET),1)
 	@until $(COMPOSE) exec -T postgres pg_isready -U tidx -d tidx > /dev/null 2>&1; do sleep 1; done
 	@echo "✓ Ready."
 endif
+
+# Build & run the indexer in this worktree with unique ports.
+# Prereqs: shared docker infra (postgres, clickhouse) is already running;
+# `.env` contains the RPC URLs referenced by config.prod.toml.
+# Generates config.local.toml (gitignored) from config.prod.toml with
+# per-worktree HTTP/Prometheus ports.
+dev:
+	@echo "Worktree=$(WORKTREE)  HTTP=$(DEV_HTTP_PORT)  Prometheus=$(DEV_PROM_PORT)"
+	@sed -e 's/^port = 8080$$/port = $(DEV_HTTP_PORT)/' \
+	     -e 's/^port = 9090$$/port = $(DEV_PROM_PORT)/' \
+	     config.prod.toml > config.local.toml
+	@bash -c 'if [ -f .env ]; then set -a; source .env; set +a; fi; \
+	          cargo run -- up --config config.local.toml'
 
 # Stop all services
 down:
@@ -281,6 +303,7 @@ help:
 	@echo "  make down              Stop all services"
 	@echo "  make logs              Tail indexer logs"
 	@echo "  make build             Build Docker image"
+	@echo "  make dev               Build & run indexer in this worktree (unique ports)"
 	@echo ""
 	@echo "  make test              Run all tests (PostgreSQL + ClickHouse)"
 	@echo "  make check             Run clippy lints"

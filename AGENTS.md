@@ -66,6 +66,34 @@ cargo run -- up --config /path/to/config.toml
 cargo run -- status
 ```
 
+### Run in a worktree (per-worktree ports)
+
+When working in a git worktree, use `make dev` to start the indexer with
+ports unique to this worktree. This lets multiple worktrees run their own
+indexer concurrently against the shared docker-compose infra
+(postgres, clickhouse) without port collisions.
+
+```bash
+make dev
+```
+
+What it does:
+1. Computes a stable port offset from the worktree directory name so each
+   worktree gets its own `DEV_HTTP_PORT` and `DEV_PROM_PORT`
+   (base 18080 / 19090, offset 0–899).
+2. Generates `config.local.toml` (gitignored) from `config.prod.toml`
+   with the per-worktree ports patched in.
+3. Sources `.env` if present, then runs `cargo run -- up --config config.local.toml`.
+
+Prereqs:
+- Shared docker-compose infra running (postgres + clickhouse).
+- `.env` populated with the RPC URLs referenced by `config.prod.toml`
+  (see `.env.example`).
+
+Worktree data is **not** isolated — all worktrees write to the same postgres
+databases declared in `config.prod.toml`. If you need isolation, edit
+`config.prod.toml`'s `pg_url` before running `make dev`.
+
 ### HTTP API Endpoints
 ```bash
 # Health check
