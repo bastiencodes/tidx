@@ -387,6 +387,25 @@ fn spawn_sync_engine(
             }
         };
 
+        // Spawn the ERC20 metadata worker alongside the sync engine.
+        // Uses a dedicated low-concurrency RPC client so Multicall3 requests
+        // don't contend with realtime/backfill semaphores.
+        {
+            let metadata_pool = throttled_pool.inner().clone();
+            let metadata_rpc = tidx::sync::fetcher::RpcClient::with_concurrency(&chain.rpc_url, 2);
+            let metadata_chain_id = chain.chain_id;
+            let metadata_shutdown = shutdown_rx.resubscribe();
+            tokio::spawn(async move {
+                tidx::sync::erc20_metadata::Erc20MetadataWorker::new(
+                    metadata_pool,
+                    metadata_rpc,
+                    metadata_chain_id,
+                )
+                .run(metadata_shutdown)
+                .await;
+            });
+        }
+
         if let Err(e) = engine.run(shutdown_rx).await {
             error!(error = %e, chain = %chain.name, "Sync engine failed");
         }

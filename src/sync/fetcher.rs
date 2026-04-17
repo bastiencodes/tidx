@@ -88,6 +88,27 @@ impl RpcClient {
         Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
     }
 
+    /// Executes an `eth_call` against the latest block and returns the raw return data.
+    ///
+    /// Used by the ERC20 metadata worker to read view functions via Multicall3.
+    /// `to` and `data` are hex-encoded with `0x` prefix (20-byte address / arbitrary calldata).
+    pub async fn eth_call(&self, to: &str, data: &str) -> Result<Vec<u8>> {
+        let resp: RpcResponse<String> = self
+            .call(
+                "eth_call",
+                serde_json::json!([{"to": to, "data": data}, "latest"]),
+            )
+            .await?;
+        if let Some(err) = resp.error {
+            anyhow::bail!("eth_call error: {}", err.message);
+        }
+        let hex = resp
+            .result
+            .ok_or_else(|| anyhow!("No result for eth_call"))?;
+        let trimmed = hex.trim_start_matches("0x");
+        hex::decode(trimmed).map_err(|e| anyhow!("Invalid eth_call return hex: {e}"))
+    }
+
     pub async fn get_block(&self, num: u64, full_txs: bool) -> Result<Block> {
         let resp: RpcResponse<Block> = self
             .call(
