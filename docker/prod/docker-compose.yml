@@ -99,8 +99,15 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
+      # Provisioning: auto-register the Prometheus data source and load any
+      # dashboards under ./grafana/dashboards on first boot. See:
+      # https://grafana.com/docs/grafana/latest/administration/provisioning/
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    depends_on:
+      - prometheus
     restart: unless-stopped
     profiles:
       - monitoring

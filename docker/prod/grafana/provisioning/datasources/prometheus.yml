@@ -1,0 +1,18 @@
+# Provisions the Prometheus instance from the docker/prod compose stack as the
+# default Grafana data source on first boot. See:
+# https://grafana.com/docs/grafana/latest/administration/provisioning/#data-sources
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # Resolves via the compose network — `prometheus` is the service name in
+    # docker/prod/docker-compose.yml. The container port is 9090 (the host
+    # port mapping is 9091 but that's host-side only).
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 15s
