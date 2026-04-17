@@ -1,0 +1,592 @@
+{
+  "id": null,
+  "uid": "tidx",
+  "title": "tidx",
+  "description": "Unified tidx operations dashboard. Rows are collapsible — Sync Health is expanded by default, drill into the others as needed.",
+  "tags": ["tidx"],
+  "timezone": "",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "type": "datasource",
+        "name": "datasource",
+        "label": "Data source",
+        "query": "prometheus",
+        "hide": 0,
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      },
+      {
+        "type": "query",
+        "name": "chain_id",
+        "label": "Chain",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(tidx_synced_block, chain_id)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Sync Health",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Synced block",
+      "description": "Highest block contiguously synced (no gaps below).",
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_synced_block{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Chain head",
+      "description": "Latest block the RPC endpoint reports — our target.",
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_sync_head_block{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sync lag (blocks)",
+      "description": "head - synced. Healthy is single-digit; persistent double-digit lag is a red flag.",
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_sync_lag_blocks{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Sync rate (blk/s)",
+      "description": "Rolling 5s rate maintained by the sync engine.",
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_sync_blocks_per_second{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Gaps (blocks)",
+      "description": "Blocks missing between backfill_num and synced_num, per sink. Non-zero = gap-fill still working.",
+      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (chain_id) (tidx_gap_blocks{chain_id=~\"$chain_id\"})", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Backfill remaining",
+      "description": "Postgres backfill distance-to-origin. 0 = historic sync complete.",
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_backfill_remaining_blocks{sink=\"postgres\",chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "short" } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Synced vs head over time",
+      "description": "Divergence = growing sync lag.",
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_synced_block{chain_id=~\"$chain_id\"}",    "legendFormat": "synced (chain {{chain_id}})", "refId": "A" },
+        { "expr": "tidx_sync_head_block{chain_id=~\"$chain_id\"}", "legendFormat": "head (chain {{chain_id}})",   "refId": "B" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 0 }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Sync rate over time",
+      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "tidx_sync_blocks_per_second{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Indexing Throughput",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Blocks / txs / logs indexed (per minute)",
+          "description": "5m rate scaled to per-minute. Spikes are normal during backfill.",
+          "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (chain_id) (rate(tidx_blocks_indexed_total{chain_id=~\"$chain_id\"}[5m])) * 60", "legendFormat": "blocks (chain {{chain_id}})", "refId": "A" },
+            { "expr": "sum by (chain_id) (rate(tidx_txs_indexed_total{chain_id=~\"$chain_id\"}[5m])) * 60",    "legendFormat": "txs (chain {{chain_id}})",    "refId": "B" },
+            { "expr": "sum by (chain_id) (rate(tidx_logs_indexed_total{chain_id=~\"$chain_id\"}[5m])) * 60",   "legendFormat": "logs (chain {{chain_id}})",   "refId": "C" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Sink write p99 by table",
+          "description": "Per-table 99th-percentile write duration, split by sink. Summary-shape metric — reads the quantile label directly.",
+          "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "tidx_sink_write_duration_seconds{quantile=\"0.99\"}", "legendFormat": "{{sink}} / {{table}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 0 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Sink errors (rate)",
+          "description": "Non-zero = sink write failures. Alert candidate.",
+          "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "rate(tidx_sink_errors_total[5m])", "legendFormat": "{{sink}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Sink rows written (rate)",
+          "description": "Rows/sec flowing into each sink+table combination.",
+          "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (sink, table) (rate(tidx_sink_write_rows_total[5m]))", "legendFormat": "{{sink}} / {{table}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        }
+      ]
+    },
+
+    {
+      "id": 300,
+      "type": "row",
+      "title": "RPC",
+      "gridPos": { "x": 0, "y": 14, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "RPC request rate by method",
+          "gridPos": { "x": 0, "y": 15, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (method) (rate(tidx_rpc_requests_total[5m]))", "legendFormat": "{{method}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 20,
+                "stacking": { "mode": "normal", "group": "A" }
+              }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "RPC latency p95 by method",
+          "description": "Summary-shape metric — reads the quantile label directly.",
+          "gridPos": { "x": 12, "y": 15, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "tidx_rpc_request_duration_seconds{quantile=\"0.95\",success=\"true\"}", "legendFormat": "{{method}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 0 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "RPC success rate (5m)",
+          "description": "rate(success=true) / rate(total). Red below 95%.",
+          "gridPos": { "x": 0, "y": 23, "w": 8, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum(rate(tidx_rpc_requests_total{success=\"true\"}[5m])) / clamp_min(sum(rate(tidx_rpc_requests_total[5m])), 1e-9)", "legendFormat": "success", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.95 },
+                  { "color": "green", "value": 0.99 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "RPC errors (rate)",
+          "description": "Failed RPC requests per second by method. Bursts usually correlate with provider-side incidents.",
+          "gridPos": { "x": 8, "y": 23, "w": 16, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (method) (rate(tidx_rpc_requests_total{success=\"false\"}[5m]))", "legendFormat": "{{method}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        }
+      ]
+    },
+
+    {
+      "id": 400,
+      "type": "row",
+      "title": "ERC20 Metadata",
+      "gridPos": { "x": 0, "y": 15, "w": 24, "h": 1 },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 17,
+          "type": "stat",
+          "title": "Pending backlog (current)",
+          "description": "Rows in erc20_tokens with resolution_status='pending'. Alert if trending up.",
+          "gridPos": { "x": 0, "y": 16, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (chain_id) (tidx_erc20_tokens_pending{chain_id=~\"$chain_id\"})", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1000 },
+                  { "color": "red", "value": 10000 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 18,
+          "type": "stat",
+          "title": "Worker backoff depth",
+          "description": "0 = healthy; anything > 0 means the worker is in exponential-backoff retry mode.",
+          "gridPos": { "x": 6, "y": 16, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "max by (chain_id) (tidx_erc20_metadata_consecutive_failures{chain_id=~\"$chain_id\"})", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 },
+                  { "color": "red", "value": 3 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 19,
+          "type": "stat",
+          "title": "Resolution success rate (5m)",
+          "description": "rate(ok) / rate(ok+partial+failed) over the last 5m.",
+          "gridPos": { "x": 12, "y": 16, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum(rate(tidx_erc20_metadata_resolved_total{status=\"ok\",chain_id=~\"$chain_id\"}[5m])) / clamp_min(sum(rate(tidx_erc20_metadata_resolved_total{chain_id=~\"$chain_id\"}[5m])), 1e-9)", "legendFormat": "ok share", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.8 },
+                  { "color": "green", "value": 0.95 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 20,
+          "type": "stat",
+          "title": "Discovery rate (per minute)",
+          "description": "New rows inserted into erc20_tokens by the sync writer, averaged over 5m, scaled to per-minute.",
+          "gridPos": { "x": 18, "y": 16, "w": 6, "h": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "rate(tidx_erc20_tokens_discovered_total[5m]) * 60", "legendFormat": "tokens/min", "refId": "A" }
+          ],
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "fieldConfig": { "defaults": { "unit": "short" } }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Resolution outcomes (rate, stacked)",
+          "description": "Per-status rate of resolution updates. Large jumps in 'failed' or 'partial' merit investigation.",
+          "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "sum by (status) (rate(tidx_erc20_metadata_resolved_total{chain_id=~\"$chain_id\"}[5m]))", "legendFormat": "{{status}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "fillOpacity": 50,
+                "stacking": { "mode": "normal", "group": "A" }
+              }
+            },
+            "overrides": [
+              { "matcher": { "id": "byName", "options": "ok" },      "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+              { "matcher": { "id": "byName", "options": "partial" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
+              { "matcher": { "id": "byName", "options": "failed" },  "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+            ]
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Multicall3 batch latency",
+          "description": "Per-batch aggregate3 RPC latency. Summary-shape metric — reads the quantile label directly.",
+          "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "tidx_erc20_metadata_multicall_duration_seconds{quantile=\"0.5\",chain_id=~\"$chain_id\"}",  "legendFormat": "p50 chain {{chain_id}}", "refId": "A" },
+            { "expr": "tidx_erc20_metadata_multicall_duration_seconds{quantile=\"0.95\",chain_id=~\"$chain_id\"}", "legendFormat": "p95 chain {{chain_id}}", "refId": "B" },
+            { "expr": "tidx_erc20_metadata_multicall_duration_seconds{quantile=\"0.99\",chain_id=~\"$chain_id\"}", "legendFormat": "p99 chain {{chain_id}}", "refId": "C" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 10 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Pending backlog over time",
+          "description": "Trending up = resolution falling behind discovery.",
+          "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "tidx_erc20_tokens_pending{chain_id=~\"$chain_id\"}", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        },
+        {
+          "id": 24,
+          "type": "timeseries",
+          "title": "Batch errors (rate)",
+          "description": "Multicall3 invocation failures (RPC errors, decode errors). Sustained non-zero = worker is unhealthy.",
+          "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            { "expr": "rate(tidx_erc20_metadata_batch_errors_total{chain_id=~\"$chain_id\"}[5m])", "legendFormat": "chain {{chain_id}}", "refId": "A" }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": { "drawStyle": "line", "lineInterpolation": "linear", "fillOpacity": 20 }
+            }
+          },
+          "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+        }
+      ]
+    }
+  ]
+}
