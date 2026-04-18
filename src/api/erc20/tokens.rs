@@ -8,7 +8,7 @@
 //!
 //! Each row is enriched with Trust Wallet metadata via a LEFT JOIN on the
 //! `token_list` table (populated by `src/sync/tw_assets.rs` under
-//! `source = 'trustwallet'`). Enrichment is purely additive — on-chain
+//! `source = 'trust_wallet'`). Enrichment is purely additive — on-chain
 //! `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth; the
 //! token list adds `logo_url`, `website`, `description`, `explorer`,
 //! `tags`, `links`, and `trust_wallet_status`.
@@ -25,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::pagination::{self, DEFAULT_LIMIT, MAX_LIMIT};
 use crate::api::{ApiError, AppState};
 
-/// Today we only surface the `trustwallet` source in `/erc20/tokens`
+/// Today we only surface the `trust_wallet` source in `/erc20/tokens`
 /// enrichment; adding a second source is a follow-up that will likely
 /// grow a `?source=` query parameter.
-const TW_SOURCE: &str = "trustwallet";
+const TW_SOURCE: &str = "trust_wallet";
 
 /// Keyset cursor: `first_transfer_at` plus the contract address as a
 /// tiebreaker, since multiple tokens can share a block timestamp.

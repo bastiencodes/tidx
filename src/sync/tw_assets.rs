@@ -3,7 +3,7 @@
 //! Mirrors the curated metadata that `trustwallet/assets` publishes for
 //! each listed ERC20 (name, website, description, explorer, status, tags,
 //! links, …) into the shared `token_list` table (under
-//! `source = 'trustwallet'`) so it can be joined into the `/erc20/tokens`
+//! `source = 'trust_wallet'`) so it can be joined into the `/erc20/tokens`
 //! response alongside the on-chain metadata resolved by
 //! `erc20_metadata.rs`.
 //!
@@ -67,7 +67,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `source` tag this worker writes to in the shared `token_list` table.
 /// Part of the composite PK together with `(chain_id, address)`.
-const SOURCE_NAME: &str = "trustwallet";
+const SOURCE_NAME: &str = "trust_wallet";
 
 /// Chain-id → Trust Wallet blockchain slug. Only chains in this table are
 /// enriched; everything else (e.g. sepolia, private testnets) no-ops.
@@ -402,7 +402,7 @@ async fn fetch_info_json(
 }
 
 /// Upsert a resolved info.json into `token_list` under
-/// `source = 'trustwallet'`. The composite PK `(source, chain_id, address)`
+/// `source = 'trust_wallet'`. The composite PK `(source, chain_id, address)`
 /// makes this idempotent across re-fetches of the same blob sha (which
 /// we already filter out upstream, but the DB is the source of truth).
 async fn upsert_asset(

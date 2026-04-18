@@ -5,7 +5,7 @@
 -- without stepping on each other for the same token.
 --
 -- Populated by per-source workers (first up: `src/sync/tw_assets.rs`,
--- which writes `source = 'trustwallet'`). Read-side the table is LEFT
+-- which writes `source = 'trust_wallet'`). Read-side the table is LEFT
 -- JOINed onto `/erc20/tokens` responses to enrich on-chain metadata with
 -- human-curated logos, links, and status.
 --
@@ -14,7 +14,7 @@
 -- now and will migrate into an `extensions JSONB` column in a follow-up
 -- when a second source actually needs them.
 CREATE TABLE IF NOT EXISTS token_list (
-    -- Provenance: 'trustwallet' | 'uniswap' | '1inch' | ...
+    -- Provenance: 'trust_wallet' | 'uniswap' | '1inch' | ...
     source      TEXT NOT NULL,
     chain_id    INT8 NOT NULL,
     address     BYTEA NOT NULL,
