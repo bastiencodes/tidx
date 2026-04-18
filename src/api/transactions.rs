@@ -23,6 +23,9 @@
 //!                                                 / `error`). Not compatible
 //!                                                 with `block=`, `address=`,
 //!                                                 or pagination params.
+//!                                                 Accepts `&decode=true` to
+//!                                                 populate `decoded` on each
+//!                                                 streamed tx.
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -547,7 +550,15 @@ async fn handle_live(
             };
             match conn.query(&latest_sql(), &[&DEFAULT_LIMIT]).await {
                 Ok(rows) => {
-                    let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                    let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                    if params.decode {
+                        let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+                        let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+                        let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+                        for (tx, d) in transactions.iter_mut().zip(decoded) {
+                            tx.decoded = Some(d);
+                        }
+                    }
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
                     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -613,7 +624,15 @@ async fn handle_live(
                         let qstart = Instant::now();
                         match conn.query(&by_block_all_sql(), &[&block_num]).await {
                             Ok(rows) => {
-                                let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                                let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                                if params.decode {
+                                    let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+                                    let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+                                    let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+                                    for (tx, d) in transactions.iter_mut().zip(decoded) {
+                                        tx.decoded = Some(d);
+                                    }
+                                }
                                 let count = transactions.len();
                                 let resp = TransactionsResponse {
                                     ok: true,
