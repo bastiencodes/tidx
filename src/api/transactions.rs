@@ -29,6 +29,9 @@
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
+//!                                                 Accepts `&include_logs=true`
+//!                                                 to also fetch emitted logs
+//!                                                 ordered by `log_idx`.
 
 use std::convert::Infallible;
 use std::time::Instant;
@@ -127,6 +130,21 @@ pub struct Transaction {
     /// `["uniswap", "dex"]` or `["tornado-cash", "blocked"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
+    /// Present only when the caller set `?include_logs=true` on the detail
+    /// endpoint. Ordered by `log_idx` ascending. Empty vec means the tx
+    /// emitted no logs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logs: Option<Vec<Log>>,
+}
+
+#[derive(Serialize)]
+pub struct Log {
+    log_index: i32,
+    address: String,
+    /// Non-null prefix of (topic0..topic3), hex-encoded. EVM logs have
+    /// 0-4 topics; the schema stores them as independent nullable columns.
+    topics: Vec<String>,
+    data: String,
 }
 
 #[derive(Serialize)]
@@ -519,6 +537,7 @@ fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
         status: row.get(17),
         decoded: None,
         labels: None,
+        logs: None,
     }
 }
 
@@ -764,6 +783,9 @@ pub struct TransactionDetailParams {
     /// Populate `labels` on the tx using the `labels_*` tables.
     #[serde(default)]
     labels: bool,
+    /// Populate `logs` on the tx by fetching from the `logs` table.
+    #[serde(default, alias = "includeLogs")]
+    include_logs: bool,
 }
 
 /// `GET /transactions/:hash?chainId=X` — `hash` is a `0x`-prefixed 32-byte transaction hash.
@@ -806,12 +828,49 @@ pub async fn get_transaction(
     if params.labels {
         attach_labels(&pool, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
+    if params.include_logs {
+        let log_rows = conn
+            .query(LOGS_BY_TX_HASH_SQL, &[&hash_bytes])
+            .await
+            .map_err(|e| ApiError::QueryError(e.to_string()))?;
+        transaction.logs = Some(log_rows.iter().map(log_row_to_log).collect());
+    }
 
     Ok(Json(TransactionResponse {
         ok: true,
         transaction,
         query_time_ms,
     }))
+}
+
+const LOGS_BY_TX_HASH_SQL: &str = r#"
+    SELECT log_idx, address, topic0, topic1, topic2, topic3, data
+    FROM logs
+    WHERE tx_hash = $1
+    ORDER BY log_idx ASC
+"#;
+
+fn log_row_to_log(row: &tokio_postgres::Row) -> Log {
+    let address: Vec<u8> = row.get(1);
+    let topic0: Option<Vec<u8>> = row.get(2);
+    let topic1: Option<Vec<u8>> = row.get(3);
+    let topic2: Option<Vec<u8>> = row.get(4);
+    let topic3: Option<Vec<u8>> = row.get(5);
+    let data: Vec<u8> = row.get(6);
+
+    let topics = [topic0, topic1, topic2, topic3]
+        .into_iter()
+        .take_while(Option::is_some)
+        .flatten()
+        .map(|t| hex_prefixed(&t))
+        .collect();
+
+    Log {
+        log_index: row.get(0),
+        address: hex_prefixed(&address),
+        topics,
+        data: hex_prefixed(&data),
+    }
 }
 
 /// Parse an `0x`-prefixed 20-byte Ethereum address into raw bytes for a
