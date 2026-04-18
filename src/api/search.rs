@@ -23,6 +23,10 @@ use crate::api::{ApiError, AppState};
 /// Cap on rows returned by the free-text ERC20 branch.
 const TOKEN_LIMIT: i64 = 20;
 
+/// Token-list source used to derive `is_verified` (status = 'active') for
+/// search-result ordering. Mirrors the constant in `api::erc20::tokens`.
+const TW_SOURCE: &str = "trust_wallet";
+
 #[derive(Deserialize)]
 pub struct SearchParams {
     q: String,
@@ -147,19 +151,28 @@ pub async fn search(
                 .replace('%', "\\%")
                 .replace('_', "\\_");
             let pattern = format!("%{escaped}%");
+            let chain_id_i64 = params.chain_id as i64;
+            // LEFT JOIN `token_list` so verified (Trust-Wallet-`active`) tokens
+            // sort above unlisted/abandoned/spam hits. The join is sargable on
+            // the composite PK and adds one boolean to the sort key ahead of
+            // the existing symbol-match / length / recency ordering.
             let rows = conn
                 .query(
                     r#"
-                    SELECT address, name, symbol
-                    FROM erc20_tokens
-                    WHERE symbol ILIKE $1 OR name ILIKE $1
+                    SELECT t.address, t.name, t.symbol,
+                           COALESCE(tl.status = 'active', false) AS is_verified
+                    FROM erc20_tokens t
+                    LEFT JOIN token_list tl
+                      ON tl.source = $2 AND tl.chain_id = $3 AND tl.address = t.address
+                    WHERE t.symbol ILIKE $1 OR t.name ILIKE $1
                     ORDER BY
-                        CASE WHEN symbol ILIKE $1 THEN 0 ELSE 1 END,
-                        length(symbol) ASC NULLS LAST,
-                        first_transfer_at DESC
-                    LIMIT $2
+                        is_verified DESC,
+                        CASE WHEN t.symbol ILIKE $1 THEN 0 ELSE 1 END,
+                        length(t.symbol) ASC NULLS LAST,
+                        t.first_transfer_at DESC
+                    LIMIT $4
                     "#,
-                    &[&pattern, &TOKEN_LIMIT],
+                    &[&pattern, &TW_SOURCE, &chain_id_i64, &TOKEN_LIMIT],
                 )
                 .await
                 .map_err(|e| ApiError::QueryError(e.to_string()))?;
