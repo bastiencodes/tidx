@@ -135,10 +135,12 @@ fn try_decode_function(text_sig: &str, args: &[u8]) -> Option<Decoded> {
 
 /// An event-log view suitable for ABI decoding. `topics[0]` is the event
 /// selector (topic0); remaining topics are indexed args. Anonymous events
-/// (no topic0) should be skipped by the caller.
-pub struct EventInput<'a> {
-    pub topics: Vec<&'a [u8]>,
-    pub data: &'a [u8],
+/// (no topic0) should be skipped by the caller. Owns its bytes — topics
+/// and data are small, so owning avoids lifetime gymnastics at the call
+/// site.
+pub struct EventInput {
+    pub topics: Vec<Vec<u8>>,
+    pub data: Vec<u8>,
 }
 
 /// Decode a batch of event logs. For each event: `None` if `topics` is
@@ -148,7 +150,7 @@ pub struct EventInput<'a> {
 /// fallback when args can't be decoded.
 pub async fn decode_events_batch(
     client: &Client,
-    events: &[EventInput<'_>],
+    events: &[EventInput],
 ) -> Vec<Option<Decoded>> {
     // Unique 32-byte topic0 values we need candidates for.
     let mut topic0s: Vec<[u8; 32]> = Vec::with_capacity(events.len());
@@ -187,15 +189,10 @@ pub async fn decode_events_batch(
         .collect()
 }
 
-impl EventInput<'_> {
+impl EventInput {
     fn topic0(&self) -> Option<[u8; 32]> {
         let t = self.topics.first()?;
-        if t.len() != 32 {
-            return None;
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(t);
-        Some(out)
+        <[u8; 32]>::try_from(t.as_slice()).ok()
     }
 }
 
@@ -227,7 +224,7 @@ async fn lookup_topic0s(
 /// Try to fully decode `ev` against the canonical signature `text_sig`,
 /// using the heuristic that the first `(topics.len() - 1)` params are
 /// indexed.
-fn try_decode_event(text_sig: &str, ev: &EventInput<'_>) -> Option<Decoded> {
+fn try_decode_event(text_sig: &str, ev: &EventInput) -> Option<Decoded> {
     let canon = parse_canonical_event_sig(text_sig)?;
     let indexed_count = ev.topics.len().checked_sub(1)?;
     if indexed_count > canon.params.len() {
@@ -240,9 +237,9 @@ fn try_decode_event(text_sig: &str, ev: &EventInput<'_>) -> Option<Decoded> {
     let topic_b256: Vec<B256> = ev
         .topics
         .iter()
-        .map(|t| B256::try_from(*t).ok())
+        .map(|t| B256::try_from(t.as_slice()).ok())
         .collect::<Option<Vec<_>>>()?;
-    let log_data = LogData::new_unchecked(topic_b256, ev.data.to_vec().into());
+    let log_data = LogData::new_unchecked(topic_b256, ev.data.clone().into());
 
     let decoded: DecodedEvent = event.decode_log(&log_data).ok()?;
 
@@ -426,8 +423,8 @@ mod tests {
         let data = hex_bytes("0000000000000000000000000000000000000000000000000de0b6b3a7640000");
 
         let ev = EventInput {
-            topics: vec![&topic0, &topic1, &topic2],
-            data: &data,
+            topics: vec![topic0, topic1, topic2],
+            data,
         };
         let decoded = try_decode_event("Transfer(address,address,uint256)", &ev)
             .expect("decode succeeds");

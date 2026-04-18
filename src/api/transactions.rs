@@ -855,30 +855,20 @@ pub async fn get_transaction(
         let mut logs: Vec<Log> = log_rows.iter().map(log_row_to_log).collect();
 
         if params.decode && !logs.is_empty() {
-            // Build event inputs from the raw bytes (not the hex strings on
-            // `Log`, to avoid a re-decode round-trip).
-            let topics_per_row: Vec<Vec<&[u8]>> = log_rows
+            let events: Vec<crate::decoder::EventInput> = log_rows
                 .iter()
-                .map(|r| {
-                    let t0: Option<&[u8]> = r.get(2);
-                    let t1: Option<&[u8]> = r.get(3);
-                    let t2: Option<&[u8]> = r.get(4);
-                    let t3: Option<&[u8]> = r.get(5);
-                    [t0, t1, t2, t3]
-                        .into_iter()
-                        .take_while(Option::is_some)
-                        .flatten()
-                        .collect()
-                })
-                .collect();
-            let data_per_row: Vec<&[u8]> =
-                log_rows.iter().map(|r| r.get::<_, &[u8]>(6)).collect();
-            let events: Vec<crate::decoder::EventInput<'_>> = topics_per_row
-                .iter()
-                .zip(data_per_row.iter())
-                .map(|(topics, data)| crate::decoder::EventInput {
-                    topics: topics.clone(),
-                    data,
+                .map(|r| crate::decoder::EventInput {
+                    topics: [
+                        r.get::<_, Option<Vec<u8>>>(2),
+                        r.get(3),
+                        r.get(4),
+                        r.get(5),
+                    ]
+                    .into_iter()
+                    .take_while(Option::is_some)
+                    .flatten()
+                    .collect(),
+                    data: r.get(6),
                 })
                 .collect();
             let decoded = crate::decoder::decode_events_batch(&conn, &events).await;
