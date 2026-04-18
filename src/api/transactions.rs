@@ -38,7 +38,11 @@
 //!                                                 `&decode=true`, each log's
 //!                                                 topic0 is resolved against
 //!                                                 the `signatures` cache and
-//!                                                 best-effort decoded.
+//!                                                 best-effort decoded. When
+//!                                                 combined with `&labels=true`,
+//!                                                 each log's emitting
+//!                                                 `address` is resolved against
+//!                                                 the `labels_*` tables.
 
 use std::convert::Infallible;
 use std::time::Instant;
@@ -158,6 +162,11 @@ pub struct Log {
     /// inputs[]}` (may have empty `inputs` if arg decoding failed).
     #[serde(skip_serializing_if = "Option::is_none")]
     decoded: Option<Option<crate::decoder::Decoded>>,
+    /// Present only when the caller set both `?labels=true` and
+    /// `?include_logs=true`. Empty vec means the log's emitting address
+    /// had no label; otherwise one entry per tag (e.g. `["uniswap", "dex"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<Vec<crate::labels::Label>>,
 }
 
 #[derive(Serialize)]
@@ -877,6 +886,25 @@ pub async fn get_transaction(
             }
         }
 
+        if params.labels {
+            let log_addrs: Vec<[u8; 20]> = log_rows
+                .iter()
+                .filter_map(|r| {
+                    let a: Vec<u8> = r.get(1);
+                    <[u8; 20]>::try_from(a.as_slice()).ok()
+                })
+                .collect();
+            let map = crate::labels::lookup_batch(&pool, &log_addrs).await;
+            for (log, row) in logs.iter_mut().zip(log_rows.iter()) {
+                let a: Vec<u8> = row.get(1);
+                let labels = <[u8; 20]>::try_from(a.as_slice())
+                    .ok()
+                    .and_then(|k| map.get(&k).cloned())
+                    .unwrap_or_default();
+                log.labels = Some(labels);
+            }
+        }
+
         transaction.logs = Some(logs);
     }
 
@@ -915,6 +943,7 @@ fn log_row_to_log(row: &tokio_postgres::Row) -> Log {
         topics,
         data: hex_prefixed(&data),
         decoded: None,
+        labels: None,
     }
 }
 
