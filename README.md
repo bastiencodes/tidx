@@ -480,7 +480,7 @@ A new token appears as `pending` within sync latency (~2–12s) and flips to `ok
 
 *"Token lists"* is the ecosystem term for curated registries of token metadata maintained off-chain — see [Uniswap's Token Lists specification](https://github.com/Uniswap/token-lists) for the canonical JSON-schema standard. The shared `token_list` table is loosely modelled on the spec's `TokenInfo` shape and keyed on `(source, chain_id, address)` so multiple registries can coexist. Trust Wallet is the first source we mirror; additional sources (1inch, CoinGecko, Uniswap lists) will land as additional `source` values in the same table.
 
-For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into `token_list` under `source = 'trust_wallet'` and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` (`active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
+For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into `token_list` under `source = 'trust_wallet'` and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `is_spam` (`true` only when Trust Wallet flags the token as `spam`; `active` and `abandoned` both map to `false`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
 
 Each worker tick has two phases, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
 
