@@ -45,6 +45,8 @@ pub struct TransferParams {
 pub struct TransferEntry {
     block_number: serde_json::Value,
     block_timestamp: serde_json::Value,
+    tx_hash: serde_json::Value,
+    tx_idx: serde_json::Value,
     contract_address: serde_json::Value,
     direction: String,
     from: serde_json::Value,
@@ -134,7 +136,9 @@ pub async fn list_transfers(
             abi_address(topic1) AS "from",
             abi_address(topic2) AS "to",
             abi_uint(substring(data FROM 1 FOR 32)) AS value,
-            log_idx
+            log_idx,
+            tx_hash,
+            tx_idx
         FROM logs
         WHERE selector = '\x{TRANSFER_SELECTOR}'
             {address_filter}
@@ -202,6 +206,8 @@ pub async fn list_transfers(
             TransferEntry {
                 block_number: crate::service::format_column_json(row, 0),
                 block_timestamp: crate::service::format_column_json(row, 1),
+                tx_hash: crate::service::format_column_json(row, 7),
+                tx_idx: crate::service::format_column_json(row, 8),
                 contract_address: crate::service::format_column_json(row, 2),
                 from: from_val,
                 to: to_val,
