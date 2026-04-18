@@ -460,9 +460,9 @@ curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT 
 
 ## Metadata
 
-tidx enriches every row in `erc20_tokens` from two independent sources that layer together on the `/erc20/tokens` response: on-chain reads via Multicall3, and the curated [`trustwallet/assets`](https://github.com/trustwallet/assets) registry for logos, links, and human-curated metadata.
+Supplementary tables that enrich on-chain data with off-chain context.
 
-### On-chain
+### ERC20 Tokens
 
 The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
 
@@ -496,6 +496,16 @@ tick_secs = 86400    # default: 86_400 (24h)
 ```
 
 Both fields are optional; omitting `[metadata]` entirely keeps the defaults. Setting `enabled = false` stops the worker from spawning — the `tw_assets` table is still created by migrations, and `/erc20/tokens` still LEFT JOINs it, so every row just comes back with null Trust Wallet fields.
+
+### Labels
+
+Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT collections, etc.) sourced from [eth-labels](https://github.com/dawsbot/eth-labels) and stored in two per-chain tables:
+
+- **`labels_accounts`** — EOAs and protocol contracts. Fields: `label` (project slug), `name_tag` (e.g. `"Binance: Hot Wallet 14"`).
+- **`labels_contracts`** — Tokens, NFT collections, and other named contracts with richer metadata (`name`, `symbol`, `website`, `image_url`).
+- **Multi-tag** — PK is `(address, label)` because eth-labels is a taxonomy: one address commonly has several tags (e.g. `["tornado-cash", "blocked"]` or `["uniswap", "dex"]`). Responses return a `Vec<Label>` per address.
+- **Opt-in at query time** via `?labels=true` on `/transactions`, `/erc20/transfers`, and `/erc20/approvals`. Addresses with no match are omitted from the response's `labels` map. Contract hits are listed before account hits.
+- **Seed/refresh** by running `tidx seed-labels [--chain-id N]` — one-shot, fetches HEAD of eth-labels' `v1` branch, filters per chain, `TRUNCATE + COPY` into the target DB.
 
 ## Decoding
 

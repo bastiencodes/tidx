@@ -41,6 +41,9 @@ pub struct ApprovalsParams {
     owner: String,
     #[serde(alias = "chain_id", rename = "chainId")]
     chain_id: u64,
+    /// Populate `labels` on each approval using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 #[derive(Serialize)]
@@ -50,6 +53,11 @@ pub struct Erc20Approval {
     spender: String,
     amount: String,
     updated_at: String,
+    /// Present only when the caller set `?labels=true`. Keys (`owner`,
+    /// `spender`, `contract_address`) are omitted when no label was found.
+    /// Values are arrays because one address commonly carries multiple tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -90,7 +98,7 @@ pub async fn list_approvals(
 
     let query_time_ms = result.query_time_ms;
 
-    let approvals: Vec<Erc20Approval> = result
+    let mut approvals: Vec<Erc20Approval> = result
         .rows
         .into_iter()
         .filter_map(|row| {
@@ -105,9 +113,14 @@ pub async fn list_approvals(
                 spender,
                 amount,
                 updated_at,
+                labels: None,
             })
         })
         .collect();
+
+    if params.labels {
+        attach_approval_labels(&pool, &mut approvals).await;
+    }
 
     let count = approvals.len();
 
@@ -117,6 +130,39 @@ pub async fn list_approvals(
         count,
         query_time_ms,
     }))
+}
+
+/// Batch-lookup labels for every `owner`/`spender`/`contract_address` in
+/// `approvals` and attach a per-row `labels` map. Best-effort; failures log
+/// and drop to empty maps.
+async fn attach_approval_labels(pool: &crate::db::Pool, approvals: &mut [Erc20Approval]) {
+    let mut addrs: Vec<[u8; 20]> = Vec::with_capacity(approvals.len() * 3);
+    for a in approvals.iter() {
+        for s in [&a.owner, &a.spender, &a.contract_address] {
+            if let Some(b) = crate::labels::parse_address_20(s) {
+                addrs.push(b);
+            }
+        }
+    }
+
+    let map = crate::labels::lookup_batch(pool, &addrs).await;
+
+    for a in approvals.iter_mut() {
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
+            std::collections::BTreeMap::new();
+        for (key, val) in [
+            ("owner", &a.owner),
+            ("spender", &a.spender),
+            ("contract_address", &a.contract_address),
+        ] {
+            if let Some(b) = crate::labels::parse_address_20(val) {
+                if let Some(ls) = map.get(&b) {
+                    labels.insert(key, ls.clone());
+                }
+            }
+        }
+        a.labels = Some(labels);
+    }
 }
 
 /// Validate and normalise an Ethereum address.

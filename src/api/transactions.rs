@@ -23,6 +23,9 @@
 //!                                                 / `error`). Not compatible
 //!                                                 with `block=`, `address=`,
 //!                                                 or pagination params.
+//!                                                 Accepts `&decode=true` to
+//!                                                 populate `decoded` on each
+//!                                                 streamed tx.
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -59,6 +62,12 @@ pub struct TransactionsParams {
     limit: Option<i64>,
     #[serde(default)]
     cursor: Option<String>,
+    /// Populate `decoded` on each tx using the `signatures` cache.
+    #[serde(default)]
+    decode: bool,
+    /// Populate `labels` on each tx using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 /// Cursor for the LATEST path (`ORDER BY block_num DESC, idx DESC`).
@@ -107,6 +116,17 @@ pub struct Transaction {
     effective_gas_price: Option<String>,
     status: Option<i16>,
     contract_address: Option<String>,
+    /// Present only when the caller set `?decode=true`. Inner `None` means
+    /// selector not in cache or args failed to parse; `Some` is the decoded
+    /// `{name, signature, inputs[]}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded: Option<Option<crate::decoder::Decoded>>,
+    /// Present only when the caller set `?labels=true`. Keys (`from`, `to`,
+    /// `contract_address`) are omitted when no label was found. Values are
+    /// arrays because one address commonly carries multiple tags (e.g.
+    /// `["uniswap", "dex"]` or `["tornado-cash", "blocked"]`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -247,7 +267,18 @@ async fn handle_once(
         }
     };
 
-    let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+    let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+    if params.decode {
+        let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+        let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+        let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+        for (tx, d) in transactions.iter_mut().zip(decoded) {
+            tx.decoded = Some(d);
+        }
+    }
+    if params.labels {
+        attach_labels(&pool, &rows, &mut transactions).await;
+    }
     let count = transactions.len();
     let next_cursor = next_cursor_for(&transactions, limit, variant);
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -486,6 +517,68 @@ fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
         effective_gas_price: row.get(15),
         contract_address: contract_address.as_deref().map(hex_prefixed),
         status: row.get(17),
+        decoded: None,
+        labels: None,
+    }
+}
+
+/// Collect the unique (from/to/contract_address) addresses across `rows`,
+/// call [`crate::labels::lookup_batch`] once, and populate each tx's
+/// `labels` field. Rows with no labels get an empty BTreeMap so the
+/// `labels: {}` key is still present in the response.
+async fn attach_labels(
+    pool: &crate::db::Pool,
+    rows: &[tokio_postgres::Row],
+    txs: &mut [Transaction],
+) {
+    let mut addrs: Vec<[u8; 20]> = Vec::with_capacity(rows.len() * 3);
+    for row in rows {
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            addrs.push(a);
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                addrs.push(a);
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                addrs.push(a);
+            }
+        }
+    }
+
+    let map = crate::labels::lookup_batch(pool, &addrs).await;
+
+    for (row, tx) in rows.iter().zip(txs.iter_mut()) {
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
+            std::collections::BTreeMap::new();
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            if let Some(ls) = map.get(&a) {
+                labels.insert("from", ls.clone());
+            }
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("to", ls.clone());
+                }
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("contract_address", ls.clone());
+                }
+            }
+        }
+        tx.labels = Some(labels);
     }
 }
 
@@ -530,7 +623,15 @@ async fn handle_live(
             };
             match conn.query(&latest_sql(), &[&DEFAULT_LIMIT]).await {
                 Ok(rows) => {
-                    let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                    let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                    if params.decode {
+                        let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+                        let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+                        let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+                        for (tx, d) in transactions.iter_mut().zip(decoded) {
+                            tx.decoded = Some(d);
+                        }
+                    }
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
                     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -596,7 +697,15 @@ async fn handle_live(
                         let qstart = Instant::now();
                         match conn.query(&by_block_all_sql(), &[&block_num]).await {
                             Ok(rows) => {
-                                let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                                let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+                                if params.decode {
+                                    let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+                                    let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+                                    let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+                                    for (tx, d) in transactions.iter_mut().zip(decoded) {
+                                        tx.decoded = Some(d);
+                                    }
+                                }
                                 let count = transactions.len();
                                 let resp = TransactionsResponse {
                                     ok: true,
@@ -649,6 +758,12 @@ pub struct TransactionResponse {
 pub struct TransactionDetailParams {
     #[serde(alias = "chain_id", rename = "chainId")]
     chain_id: u64,
+    /// Populate `decoded` on the tx using the `signatures` cache.
+    #[serde(default)]
+    decode: bool,
+    /// Populate `labels` on the tx using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 /// `GET /transactions/:hash?chainId=X` — `hash` is a `0x`-prefixed 32-byte transaction hash.
@@ -678,9 +793,23 @@ pub async fn get_transaction(
 
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    let mut transaction = row_to_tx(&row);
+    if params.decode {
+        let raw_input: Vec<u8> = row.get(9);
+        let decoded = crate::decoder::decode_calldata_batch(&conn, &[raw_input.as_slice()])
+            .await
+            .into_iter()
+            .next()
+            .flatten();
+        transaction.decoded = Some(decoded);
+    }
+    if params.labels {
+        attach_labels(&pool, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
+    }
+
     Ok(Json(TransactionResponse {
         ok: true,
-        transaction: row_to_tx(&row),
+        transaction,
         query_time_ms,
     }))
 }

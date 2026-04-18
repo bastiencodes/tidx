@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
         Commands::Views(args) => cli::views::run(args).await,
         Commands::BackfillReceiptData(args) => cli::backfill_receipt_data::run(args).await,
         Commands::SeedSignatures(args) => cli::seed_signatures::run(args).await,
+        Commands::SeedLabels(args) => cli::seed_labels::run(args).await,
         Commands::Upgrade => cli::upgrade::run(),
     }
 }

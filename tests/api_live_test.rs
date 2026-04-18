@@ -360,6 +360,119 @@ async fn test_query_live_returns_sse() {
     );
 }
 
+/// Read bytes from a live SSE body until we have a complete frame
+/// (`\n\n` terminator) or timeout. Returns the first complete frame's raw text.
+async fn read_first_sse_frame(body: Body) -> String {
+    use futures::StreamExt;
+    let mut stream = body.into_data_stream();
+    let mut acc = Vec::new();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let chunk = tokio::time::timeout(remaining, stream.next())
+            .await
+            .expect("timeout waiting for first SSE frame")
+            .expect("stream ended before first frame")
+            .expect("stream error");
+        acc.extend_from_slice(&chunk);
+        if let Some(end) = acc.windows(2).position(|w| w == b"\n\n") {
+            return String::from_utf8_lossy(&acc[..end]).into_owned();
+        }
+    }
+}
+
+/// Parse an SSE frame like `event: result\ndata: {...}` into (event, json).
+fn parse_sse_frame(frame: &str) -> (String, serde_json::Value) {
+    let mut event = String::new();
+    let mut data = String::new();
+    for line in frame.lines() {
+        if let Some(v) = line.strip_prefix("event:") {
+            event = v.trim().to_string();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(v.trim_start());
+        }
+    }
+    let json = serde_json::from_str(&data)
+        .unwrap_or_else(|e| panic!("invalid JSON in SSE data: {e}: {data}"));
+    (event, json)
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn test_transactions_live_decode_populates_decoded_field() {
+    let db = TestDb::new().await;
+    let broadcaster = Arc::new(Broadcaster::new());
+    let (pools, chain_id) = make_pools(db.pool.clone());
+    let mut app = make_test_service(pools, chain_id, broadcaster).await;
+
+    // With decode=true, every tx in the initial snapshot must serialize a
+    // `decoded` key (value may be null when the selector isn't cached).
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&live=true&decode=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = read_first_sse_frame(response.into_body()).await;
+    let (event, json) = parse_sse_frame(&frame);
+    assert_eq!(event, "result", "frame: {frame}");
+    assert_eq!(json["ok"], true);
+
+    let txs = json["transactions"].as_array().expect("transactions array");
+    assert!(!txs.is_empty(), "expected seeded txs in initial snapshot");
+    for (i, tx) in txs.iter().enumerate() {
+        assert!(
+            tx.get("decoded").is_some(),
+            "tx[{i}] missing `decoded` field with decode=true: {tx}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn test_transactions_live_without_decode_omits_field() {
+    let db = TestDb::new().await;
+    let broadcaster = Arc::new(Broadcaster::new());
+    let (pools, chain_id) = make_pools(db.pool.clone());
+    let mut app = make_test_service(pools, chain_id, broadcaster).await;
+
+    // Sanity check the inverse: without `decode=true`, `decoded` is omitted
+    // (skip_serializing_if on Option::is_none).
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&live=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let frame = read_first_sse_frame(response.into_body()).await;
+    let (event, json) = parse_sse_frame(&frame);
+    assert_eq!(event, "result", "frame: {frame}");
+
+    let txs = json["transactions"].as_array().expect("transactions array");
+    assert!(!txs.is_empty(), "expected seeded txs in initial snapshot");
+    for (i, tx) in txs.iter().enumerate() {
+        assert!(
+            tx.get("decoded").is_none(),
+            "tx[{i}] should omit `decoded` without decode=true: {tx}"
+        );
+    }
+}
+
 // Unit tests for inject_block_filter (no DB required)
 
 #[test]

@@ -32,6 +32,9 @@ pub struct TransferParams {
     limit: Option<i64>,
     #[serde(default)]
     cursor: Option<String>,
+    /// Populate `labels` on each transfer using the `labels_*` tables.
+    #[serde(default)]
+    labels: bool,
 }
 
 #[derive(Serialize)]
@@ -43,6 +46,11 @@ pub struct TransferEntry {
     from: serde_json::Value,
     to: serde_json::Value,
     value: serde_json::Value,
+    /// Present only when the caller set `?labels=true`. Keys (`from`, `to`,
+    /// `contract_address`) are omitted when no label was found. Values are
+    /// arrays because one address commonly carries multiple tags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -152,7 +160,7 @@ pub async fn list_transfers(
         })
     };
 
-    let transfers: Vec<TransferEntry> = rows
+    let mut transfers: Vec<TransferEntry> = rows
         .iter()
         .map(|row| {
             let from_val = crate::service::format_column_json(row, 3);
@@ -178,9 +186,14 @@ pub async fn list_transfers(
                 to: to_val,
                 value: crate::service::format_column_json(row, 5),
                 direction,
+                labels: None,
             }
         })
         .collect();
+
+    if params.labels {
+        attach_transfer_labels(&pool, &mut transfers).await;
+    }
 
     let count = transfers.len();
 
@@ -191,4 +204,37 @@ pub async fn list_transfers(
         next_cursor,
         query_time_ms,
     }))
+}
+
+/// Batch-lookup labels for every `from`/`to`/`contract_address` in `transfers`
+/// and attach a per-row `labels` map. Best-effort; failures log and drop to
+/// empty maps.
+async fn attach_transfer_labels(pool: &crate::db::Pool, transfers: &mut [TransferEntry]) {
+    let mut addrs: Vec<[u8; 20]> = Vec::with_capacity(transfers.len() * 3);
+    for t in transfers.iter() {
+        for s in [&t.from, &t.to, &t.contract_address] {
+            if let Some(a) = s.as_str().and_then(crate::labels::parse_address_20) {
+                addrs.push(a);
+            }
+        }
+    }
+
+    let map = crate::labels::lookup_batch(pool, &addrs).await;
+
+    for t in transfers.iter_mut() {
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
+            std::collections::BTreeMap::new();
+        for (key, val) in [
+            ("from", &t.from),
+            ("to", &t.to),
+            ("contract_address", &t.contract_address),
+        ] {
+            if let Some(a) = val.as_str().and_then(crate::labels::parse_address_20) {
+                if let Some(ls) = map.get(&a) {
+                    labels.insert(key, ls.clone());
+                }
+            }
+        }
+        t.labels = Some(labels);
+    }
 }
