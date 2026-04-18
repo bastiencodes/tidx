@@ -7,16 +7,21 @@
 -- standard marker. We store them all together.
 --
 -- Chain is implicit from which per-chain Postgres DB this table lives in.
+-- See labels_accounts.sql for why (address, label) is the PK.
 CREATE TABLE IF NOT EXISTS labels_contracts (
-    address   BYTEA PRIMARY KEY,
-    label     TEXT NOT NULL,
-    name_tag  TEXT NOT NULL,
+    address   BYTEA NOT NULL,
+    label     TEXT  NOT NULL,
+    name_tag  TEXT  NOT NULL,
     name      TEXT,
     symbol    TEXT,
     website   TEXT,
     image_url TEXT,
-    source    TEXT NOT NULL
+    source    TEXT  NOT NULL,
+    PRIMARY KEY (address, label)
 );
+
+CREATE INDEX IF NOT EXISTS idx_labels_contracts_address
+    ON labels_contracts (address);
 
 COMMENT ON TABLE labels_contracts IS
     'Contract labels with metadata (tokens, NFT collections). Populated via `tidx seed-labels`.';

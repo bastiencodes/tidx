@@ -119,9 +119,11 @@ pub struct Transaction {
     #[serde(skip_serializing_if = "Option::is_none")]
     decoded: Option<Option<crate::decoder::Decoded>>,
     /// Present only when the caller set `?labels=true`. Keys (`from`, `to`,
-    /// `contract_address`) are omitted when no label was found.
+    /// `contract_address`) are omitted when no label was found. Values are
+    /// arrays because one address commonly carries multiple tags (e.g.
+    /// `["uniswap", "dex"]` or `["tornado-cash", "blocked"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<std::collections::BTreeMap<&'static str, crate::labels::Label>>,
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -549,27 +551,27 @@ async fn attach_labels(
     let map = crate::labels::lookup_batch(pool, &addrs).await;
 
     for (row, tx) in rows.iter().zip(txs.iter_mut()) {
-        let mut labels: std::collections::BTreeMap<&'static str, crate::labels::Label> =
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
             std::collections::BTreeMap::new();
         let from: Vec<u8> = row.get(4);
         if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
-            if let Some(l) = map.get(&a) {
-                labels.insert("from", l.clone());
+            if let Some(ls) = map.get(&a) {
+                labels.insert("from", ls.clone());
             }
         }
         let to: Option<Vec<u8>> = row.get(5);
         if let Some(t) = to {
             if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
-                if let Some(l) = map.get(&a) {
-                    labels.insert("to", l.clone());
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("to", ls.clone());
                 }
             }
         }
         let contract: Option<Vec<u8>> = row.get(16);
         if let Some(c) = contract {
             if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
-                if let Some(l) = map.get(&a) {
-                    labels.insert("contract_address", l.clone());
+                if let Some(ls) = map.get(&a) {
+                    labels.insert("contract_address", ls.clone());
                 }
             }
         }

@@ -478,7 +478,8 @@ Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT co
 
 - **`labels_accounts`** — EOAs and protocol contracts. Fields: `label` (project slug), `name_tag` (e.g. `"Binance: Hot Wallet 14"`).
 - **`labels_contracts`** — Tokens, NFT collections, and other named contracts with richer metadata (`name`, `symbol`, `website`, `image_url`).
-- **Opt-in at query time** via `?labels=true` on `/transactions`, `/erc20/transfers`, and `/erc20/approvals`. Absent addresses are omitted from the response's `labels` map. Contract hits take precedence over account hits for the same address.
+- **Multi-tag** — PK is `(address, label)` because eth-labels is a taxonomy: one address commonly has several tags (e.g. `["tornado-cash", "blocked"]` or `["uniswap", "dex"]`). Responses return a `Vec<Label>` per address.
+- **Opt-in at query time** via `?labels=true` on `/transactions`, `/erc20/transfers`, and `/erc20/approvals`. Addresses with no match are omitted from the response's `labels` map. Contract hits are listed before account hits.
 - **Seed/refresh** by running `tidx seed-labels [--chain-id N]` — one-shot, fetches HEAD of eth-labels' `v1` branch, filters per chain, `TRUNCATE + COPY` into the target DB.
 
 ## Decoding

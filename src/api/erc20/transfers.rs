@@ -47,9 +47,10 @@ pub struct TransferEntry {
     to: serde_json::Value,
     value: serde_json::Value,
     /// Present only when the caller set `?labels=true`. Keys (`from`, `to`,
-    /// `contract_address`) are omitted when no label was found.
+    /// `contract_address`) are omitted when no label was found. Values are
+    /// arrays because one address commonly carries multiple tags.
     #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<std::collections::BTreeMap<&'static str, crate::labels::Label>>,
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -221,7 +222,7 @@ async fn attach_transfer_labels(pool: &crate::db::Pool, transfers: &mut [Transfe
     let map = crate::labels::lookup_batch(pool, &addrs).await;
 
     for t in transfers.iter_mut() {
-        let mut labels: std::collections::BTreeMap<&'static str, crate::labels::Label> =
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
             std::collections::BTreeMap::new();
         for (key, val) in [
             ("from", &t.from),
@@ -229,8 +230,8 @@ async fn attach_transfer_labels(pool: &crate::db::Pool, transfers: &mut [Transfe
             ("contract_address", &t.contract_address),
         ] {
             if let Some(a) = val.as_str().and_then(crate::labels::parse_address_20) {
-                if let Some(l) = map.get(&a) {
-                    labels.insert(key, l.clone());
+                if let Some(ls) = map.get(&a) {
+                    labels.insert(key, ls.clone());
                 }
             }
         }

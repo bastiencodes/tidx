@@ -2,6 +2,11 @@
 //! tables (seeded by `tidx seed-labels`).
 //!
 //! Chain is implicit from the pool — each chain has its own Postgres DB.
+//!
+//! eth-labels is a taxonomy: a single address commonly carries multiple tags
+//! (e.g. a protocol tag + a compliance flag), so lookups return `Vec<Label>`
+//! per address. Contracts rows (richer metadata) are listed before accounts
+//! rows; within each source the order is by `label` slug.
 
 use std::collections::HashMap;
 
@@ -19,22 +24,19 @@ pub struct Label {
 
 /// Look up labels for a batch of 20-byte addresses in this chain's DB.
 ///
-/// Tries `labels_contracts` first (richer source — tokens / NFTs), falls
-/// back to `labels_accounts` (EOAs / protocol contracts). Addresses with
-/// no match are absent from the returned map.
+/// Returns a map from address → ordered `Vec<Label>`. Addresses with no
+/// matches are absent from the map (not present as an empty `Vec`).
 ///
 /// On PG failure, logs a warning and returns an empty map rather than
 /// propagating the error — labels are best-effort, not critical.
 pub async fn lookup_batch(
     pool: &Pool,
     addresses: &[[u8; 20]],
-) -> HashMap<[u8; 20], Label> {
+) -> HashMap<[u8; 20], Vec<Label>> {
     if addresses.is_empty() {
         return HashMap::new();
     }
 
-    // Dedup before querying — request batches repeat the same address
-    // across `from` / `to` / `contract_address` for many rows.
     let mut uniq: Vec<[u8; 20]> = addresses.to_vec();
     uniq.sort_unstable();
     uniq.dedup();
@@ -49,26 +51,27 @@ pub async fn lookup_batch(
 
     let byte_refs: Vec<&[u8]> = uniq.iter().map(|a| a.as_slice()).collect();
 
-    // `labels_accounts` first, `labels_contracts` second — inserting in that
-    // order means contracts hits overwrite account hits (contracts is richer).
-    let mut out: HashMap<[u8; 20], Label> = HashMap::new();
-    if let Err(e) = fill_from("labels_accounts", &conn, &byte_refs, &mut out).await {
-        warn!(error = %e, "labels_accounts query failed");
-    }
-    if let Err(e) = fill_from("labels_contracts", &conn, &byte_refs, &mut out).await {
+    // Contracts first (richer source), accounts second. Inside each table we
+    // ORDER BY label so results are deterministic regardless of insertion order.
+    let mut out: HashMap<[u8; 20], Vec<Label>> = HashMap::new();
+    if let Err(e) = append_from("labels_contracts", &conn, &byte_refs, &mut out).await {
         warn!(error = %e, "labels_contracts query failed");
+    }
+    if let Err(e) = append_from("labels_accounts", &conn, &byte_refs, &mut out).await {
+        warn!(error = %e, "labels_accounts query failed");
     }
     out
 }
 
-async fn fill_from(
+async fn append_from(
     table: &str,
     conn: &Client,
     byte_refs: &[&[u8]],
-    out: &mut HashMap<[u8; 20], Label>,
+    out: &mut HashMap<[u8; 20], Vec<Label>>,
 ) -> Result<(), tokio_postgres::Error> {
     let sql = format!(
-        "SELECT address, label, name_tag FROM {table} WHERE address = ANY($1)"
+        "SELECT address, label, name_tag FROM {table} \
+         WHERE address = ANY($1) ORDER BY address, label"
     );
     let rows = conn.query(&sql, &[&byte_refs]).await?;
     for row in rows {
@@ -78,13 +81,10 @@ async fn fill_from(
         }
         let mut key = [0u8; 20];
         key.copy_from_slice(addr);
-        out.insert(
-            key,
-            Label {
-                label: row.get(1),
-                name_tag: row.get(2),
-            },
-        );
+        out.entry(key).or_default().push(Label {
+            label: row.get(1),
+            name_tag: row.get(2),
+        });
     }
     Ok(())
 }

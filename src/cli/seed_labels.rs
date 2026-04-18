@@ -38,8 +38,8 @@ struct AccountEntry {
     #[serde(rename = "chainId")]
     chain_id: u64,
     label: String,
-    #[serde(rename = "nameTag")]
-    name_tag: String,
+    #[serde(rename = "nameTag", default)]
+    name_tag: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,6 +143,12 @@ async fn seed_chain(
         .await?;
     let mut sink = Box::pin(sink);
 
+    // Dedup by (address, label): upstream has true duplicates (Case A) with
+    // identical (address, label, nameTag) that would violate the composite PK.
+    // Distinct labels on the same address (Case B, e.g. `0x-protocol` + `bridge`)
+    // are preserved.
+    let mut seen: std::collections::HashSet<([u8; 20], String)> =
+        std::collections::HashSet::new();
     let mut acc_rows: u64 = 0;
     let mut acc_buf = Vec::with_capacity(64 * 1024);
     for e in accounts.iter().filter(|e| e.chain_id == chain_id) {
@@ -150,12 +156,16 @@ async fn seed_chain(
             warn!(addr = %e.address, "skipping account: invalid address");
             continue;
         };
+        if !seen.insert((addr, e.label.clone())) {
+            continue;
+        }
+        let name_tag = e.name_tag.as_deref().filter(|s| !s.is_empty()).unwrap_or(&e.label);
         write_csv_row(
             &mut acc_buf,
             &[
                 &hex_prefixed_bytea(&addr),
                 &e.label,
-                &e.name_tag,
+                name_tag,
                 SOURCE_TAG,
             ],
         );
@@ -179,6 +189,8 @@ async fn seed_chain(
         .await?;
     let mut sink = Box::pin(sink);
 
+    let mut seen: std::collections::HashSet<([u8; 20], String)> =
+        std::collections::HashSet::new();
     let mut con_rows: u64 = 0;
     let mut con_buf = Vec::with_capacity(64 * 1024);
     for e in contracts.iter().filter(|e| e.chain_id == chain_id) {
@@ -186,6 +198,9 @@ async fn seed_chain(
             warn!(addr = %e.address, "skipping contract: invalid address");
             continue;
         };
+        if !seen.insert((addr, e.label.clone())) {
+            continue;
+        }
         let name_tag = synth_name_tag(e);
         let image_url = e.image.as_deref().and_then(normalize_image_url);
 

@@ -55,8 +55,9 @@ pub struct Erc20Approval {
     updated_at: String,
     /// Present only when the caller set `?labels=true`. Keys (`owner`,
     /// `spender`, `contract_address`) are omitted when no label was found.
+    /// Values are arrays because one address commonly carries multiple tags.
     #[serde(skip_serializing_if = "Option::is_none")]
-    labels: Option<std::collections::BTreeMap<&'static str, crate::labels::Label>>,
+    labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
 }
 
 #[derive(Serialize)]
@@ -147,7 +148,7 @@ async fn attach_approval_labels(pool: &crate::db::Pool, approvals: &mut [Erc20Ap
     let map = crate::labels::lookup_batch(pool, &addrs).await;
 
     for a in approvals.iter_mut() {
-        let mut labels: std::collections::BTreeMap<&'static str, crate::labels::Label> =
+        let mut labels: std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>> =
             std::collections::BTreeMap::new();
         for (key, val) in [
             ("owner", &a.owner),
@@ -155,8 +156,8 @@ async fn attach_approval_labels(pool: &crate::db::Pool, approvals: &mut [Erc20Ap
             ("contract_address", &a.contract_address),
         ] {
             if let Some(b) = crate::labels::parse_address_20(val) {
-                if let Some(l) = map.get(&b) {
-                    labels.insert(key, l.clone());
+                if let Some(ls) = map.get(&b) {
+                    labels.insert(key, ls.clone());
                 }
             }
         }
