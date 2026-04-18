@@ -11,7 +11,7 @@
 --
 -- Logo URL is NOT stored: it's deterministic from the chain slug and the
 -- EIP-55 checksummed address, and composed at API response time.
-CREATE TABLE IF NOT EXISTS trust_wallet_assets (
+CREATE TABLE IF NOT EXISTS tw_assets (
     chain_id    INT8 NOT NULL,
     address     BYTEA NOT NULL,
 
@@ -42,12 +42,12 @@ CREATE TABLE IF NOT EXISTS trust_wallet_assets (
 );
 
 -- Enables future filters like ?exclude_spam or ?status=active.
-CREATE INDEX IF NOT EXISTS idx_trust_wallet_assets_status
-    ON trust_wallet_assets (status);
+CREATE INDEX IF NOT EXISTS idx_tw_assets_status
+    ON tw_assets (status);
 
-COMMENT ON COLUMN trust_wallet_assets.info_sha IS
+COMMENT ON COLUMN tw_assets.info_sha IS
     'Upstream Git blob SHA of info.json, used for change detection across refresh ticks';
-COMMENT ON COLUMN trust_wallet_assets.status IS
+COMMENT ON COLUMN tw_assets.status IS
     'Trust Wallet-reported status: active | spam | abandoned';
-COMMENT ON COLUMN trust_wallet_assets.asset_type IS
+COMMENT ON COLUMN tw_assets.asset_type IS
     'info.json "type" field (ERC20, BEP20, SPL, coin, ...); renamed to avoid the SQL/Rust reserved word';

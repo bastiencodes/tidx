@@ -2,7 +2,7 @@
 //!
 //! Mirrors the curated metadata that `trustwallet/assets` publishes for
 //! each listed ERC20 (name, website, description, explorer, status, tags,
-//! links, …) into the `trust_wallet_assets` table so it can be joined
+//! links, …) into the `tw_assets` table so it can be joined
 //! into the `/erc20/tokens` response alongside the on-chain metadata
 //! resolved by `erc20_metadata.rs`.
 //!
@@ -108,7 +108,7 @@ pub fn logo_url(slug: &str, addr: &Address) -> String {
 }
 
 /// Background worker that mirrors Trust Wallet's curated metadata into
-/// `trust_wallet_assets`.
+/// `tw_assets`.
 pub struct TrustWalletWorker {
     pool: Pool,
     chain_id: u64,
@@ -282,12 +282,12 @@ impl TrustWalletWorker {
     }
 
     /// Returns the current `(address → info_sha)` mapping stored in
-    /// `trust_wallet_assets` for this chain.
+    /// `tw_assets` for this chain.
     async fn load_stored_shas(&self) -> Result<HashMap<[u8; 20], String>> {
         let conn = self.pool.get().await?;
         let rows = conn
             .query(
-                "SELECT address, info_sha FROM trust_wallet_assets WHERE chain_id = $1",
+                "SELECT address, info_sha FROM tw_assets WHERE chain_id = $1",
                 &[&(self.chain_id as i64)],
             )
             .await?;
@@ -358,7 +358,7 @@ impl TrustWalletWorker {
         for addr in addresses {
             let affected = conn
                 .execute(
-                    "DELETE FROM trust_wallet_assets WHERE chain_id = $1 AND address = $2",
+                    "DELETE FROM tw_assets WHERE chain_id = $1 AND address = $2",
                     &[&(self.chain_id as i64), &addr.as_slice()],
                 )
                 .await?;
@@ -396,7 +396,7 @@ async fn fetch_info_json(
     Ok(parsed)
 }
 
-/// Upsert a resolved info.json into `trust_wallet_assets`. The primary key
+/// Upsert a resolved info.json into `tw_assets`. The primary key
 /// `(chain_id, address)` makes this idempotent across re-fetches of the
 /// same blob sha (which we already filter out upstream, but the DB is the
 /// source of truth).
@@ -410,7 +410,7 @@ async fn upsert_asset(
     let conn = pool.get().await?;
     conn.execute(
         r#"
-        INSERT INTO trust_wallet_assets (
+        INSERT INTO tw_assets (
             chain_id, address, info_sha,
             name, symbol, decimals, asset_type,
             website, description, explorer, status,

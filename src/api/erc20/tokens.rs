@@ -7,7 +7,7 @@
 //! opaque `cursor` returned as `next_cursor`.
 //!
 //! Each row is enriched with Trust Wallet metadata via a LEFT JOIN on the
-//! `trust_wallet_assets` table (populated by
+//! `tw_assets` table (populated by
 //! `src/sync/trustwallet_metadata.rs`). Enrichment is purely additive —
 //! on-chain `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth;
 //! Trust Wallet adds `logo_url` (computed), `website`, `description`,
@@ -67,7 +67,7 @@ pub struct Erc20Token {
     // ── Trust Wallet enrichment (null when the token isn't listed) ──────
     /// Canonical `logo.png` URL on trustwallet/assets. Computed from the
     /// chain slug and EIP-55 checksummed address; only emitted when a
-    /// `trust_wallet_assets` row exists for this token.
+    /// `tw_assets` row exists for this token.
     #[serde(skip_serializing_if = "Option::is_none")]
     logo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,7 +169,7 @@ pub async fn list_tokens(
     }))
 }
 
-// LEFT JOINs `trust_wallet_assets` by the chain_id bound parameter so the
+// LEFT JOINs `tw_assets` by the chain_id bound parameter so the
 // join predicate is sargable on the composite PK. `twa.info_sha` doubles
 // as the "row exists" sentinel because it's the only NOT NULL TW column
 // aside from the key.
@@ -182,7 +182,7 @@ const LIST_SQL: &str = r#"
            twa.website, twa.description, twa.explorer,
            twa.status, twa.tags, twa.links
     FROM erc20_tokens t
-    LEFT JOIN trust_wallet_assets twa
+    LEFT JOIN tw_assets twa
       ON twa.chain_id = $1 AND twa.address = t.address
     ORDER BY t.first_transfer_at DESC, t.address DESC
     LIMIT $2
@@ -200,7 +200,7 @@ const LIST_AFTER_SQL: &str = r#"
            twa.website, twa.description, twa.explorer,
            twa.status, twa.tags, twa.links
     FROM erc20_tokens t
-    LEFT JOIN trust_wallet_assets twa
+    LEFT JOIN tw_assets twa
       ON twa.chain_id = $1 AND twa.address = t.address
     WHERE (t.first_transfer_at, t.address) < ($2, $3)
     ORDER BY t.first_transfer_at DESC, t.address DESC

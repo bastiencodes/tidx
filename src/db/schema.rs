@@ -32,7 +32,7 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
     conn.batch_execute(include_str!("../../db/receipts.sql")).await?;
     conn.batch_execute(include_str!("../../db/sync_state.sql")).await?;
     conn.batch_execute(include_str!("../../db/erc20_tokens.sql")).await?;
-    conn.batch_execute(include_str!("../../db/trust_wallet_assets.sql")).await?;
+    conn.batch_execute(include_str!("../../db/tw_assets.sql")).await?;
     conn.batch_execute(include_str!("../../db/signatures.sql")).await?;
     conn.batch_execute(include_str!("../../db/functions.sql")).await?;
 
