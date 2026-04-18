@@ -33,6 +33,7 @@
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [HTTP API](#http-api)
+- [Metadata](#metadata)
 - [Decoding](#decoding)
 - [Database Schema](#database-schema)
 - [Sync Architecture](#sync-architecture)
@@ -457,7 +458,11 @@ Views are auto-prefixed with `analytics_{chainId}` when using `engine=clickhouse
 curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
 ```
 
-## ERC20 Metadata
+## Metadata
+
+tidx enriches every row in `erc20_tokens` from two independent sources that layer together on the `/erc20/tokens` response: on-chain reads via Multicall3, and the curated [`trustwallet/assets`](https://github.com/trustwallet/assets) registry for logos, links, and human-curated metadata.
+
+### On-chain
 
 The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
 
@@ -466,6 +471,19 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 - **Robustness** — `allowFailure: true` on every sub-call, plus a bytes32 fallback for legacy tokens (MKR/SAI).
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
+
+### Assets
+
+For chains Trust Wallet publishes (Ethereum mainnet today), tidx mirrors [`trustwallet/assets`](https://github.com/trustwallet/assets) into the `trust_wallet_assets` table and LEFT JOINs it onto `/erc20/tokens` responses. This adds `logo_url`, `website`, `description`, `explorer`, `tags`, `links`, and `trust_wallet_status` ( `active` / `spam` / `abandoned`) to every listed token without replacing the on-chain `name` / `symbol` / `decimals`.
+
+Two-phase fetcher, driven by the GitHub Git Trees API to avoid hammering the raw CDN:
+
+- **Tree refresh (every 24h)** — one ~16 MB call to `/repos/trustwallet/assets/git/trees/master?recursive=1` returns the entire repo tree along with a Git blob SHA per `info.json`. Filtered to this chain's slug and cached in-memory.
+- **Selective fetch (every 6h)** — intersects our `erc20_tokens` with the cached tree and fetches only the `info.json` blobs whose stored SHA doesn't match the upstream SHA. Addresses the tree no longer contains are pruned.
+
+Steady state is zero raw-CDN fetches per tick (SHAs match). The `logo.png` URL is deterministic from `(chain slug, EIP-55 address)` and composed at API response time — tidx doesn't mirror image bytes.
+
+Chain coverage is controlled by `TW_CHAIN_SLUGS` in [`src/sync/trustwallet_metadata.rs`](src/sync/trustwallet_metadata.rs). Chains not in that map are silently skipped (e.g. sepolia, private testnets).
 
 ## Decoding
 

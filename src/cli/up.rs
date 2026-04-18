@@ -425,6 +425,23 @@ fn spawn_sync_engine(
             });
         }
 
+        // Spawn the Trust Wallet assets enrichment worker. Only starts for
+        // chains Trust Wallet publishes a registry for (see TW_CHAIN_SLUGS
+        // in trustwallet_metadata.rs); otherwise `new` returns None and we
+        // skip silently.
+        {
+            let tw_pool = throttled_pool.inner().clone();
+            let tw_chain_id = chain.chain_id;
+            let tw_shutdown = shutdown_rx.resubscribe();
+            if let Some(worker) =
+                tidx::sync::trustwallet_metadata::TrustWalletWorker::new(tw_pool, tw_chain_id)
+            {
+                tokio::spawn(async move {
+                    worker.run(tw_shutdown).await;
+                });
+            }
+        }
+
         if let Err(e) = engine.run(shutdown_rx).await {
             error!(error = %e, chain = %chain.name, "Sync engine failed");
         }

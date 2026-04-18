@@ -4,5 +4,6 @@ pub mod decoder;
 pub mod engine;
 pub mod erc20_metadata;
 pub mod fetcher;
+pub mod trustwallet_metadata;
 pub mod sink;
 pub mod writer;
