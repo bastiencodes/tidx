@@ -4,6 +4,7 @@ pub mod chain;
 pub mod clickhouse;
 pub mod config;
 pub mod db;
+pub mod decoder;
 pub mod metrics;
 pub mod query;
 pub mod service;

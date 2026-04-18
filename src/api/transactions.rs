@@ -59,6 +59,9 @@ pub struct TransactionsParams {
     limit: Option<i64>,
     #[serde(default)]
     cursor: Option<String>,
+    /// Populate `decoded` on each tx using the `signatures` cache.
+    #[serde(default)]
+    decode: bool,
 }
 
 /// Cursor for the LATEST path (`ORDER BY block_num DESC, idx DESC`).
@@ -107,6 +110,11 @@ pub struct Transaction {
     effective_gas_price: Option<String>,
     status: Option<i16>,
     contract_address: Option<String>,
+    /// Present only when the caller set `?decode=true`. Inner `None` means
+    /// selector not in cache or args failed to parse; `Some` is the decoded
+    /// `{name, signature, inputs[]}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decoded: Option<Option<crate::decoder::Decoded>>,
 }
 
 #[derive(Serialize)]
@@ -247,7 +255,15 @@ async fn handle_once(
         }
     };
 
-    let transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+    let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+    if params.decode {
+        let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
+        let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
+        let decoded = crate::decoder::decode_calldata_batch(&conn, &input_refs).await;
+        for (tx, d) in transactions.iter_mut().zip(decoded) {
+            tx.decoded = Some(d);
+        }
+    }
     let count = transactions.len();
     let next_cursor = next_cursor_for(&transactions, limit, variant);
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -486,6 +502,7 @@ fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
         effective_gas_price: row.get(15),
         contract_address: contract_address.as_deref().map(hex_prefixed),
         status: row.get(17),
+        decoded: None,
     }
 }
 
@@ -649,6 +666,9 @@ pub struct TransactionResponse {
 pub struct TransactionDetailParams {
     #[serde(alias = "chain_id", rename = "chainId")]
     chain_id: u64,
+    /// Populate `decoded` on the tx using the `signatures` cache.
+    #[serde(default)]
+    decode: bool,
 }
 
 /// `GET /transactions/:hash?chainId=X` — `hash` is a `0x`-prefixed 32-byte transaction hash.
@@ -678,9 +698,20 @@ pub async fn get_transaction(
 
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    let mut transaction = row_to_tx(&row);
+    if params.decode {
+        let raw_input: Vec<u8> = row.get(9);
+        let decoded = crate::decoder::decode_calldata_batch(&conn, &[raw_input.as_slice()])
+            .await
+            .into_iter()
+            .next()
+            .flatten();
+        transaction.decoded = Some(decoded);
+    }
+
     Ok(Json(TransactionResponse {
         ok: true,
-        transaction: row_to_tx(&row),
+        transaction,
         query_time_ms,
     }))
 }
