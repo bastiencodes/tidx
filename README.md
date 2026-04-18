@@ -33,6 +33,7 @@
 - [Configuration](#configuration)
 - [CLI](#cli)
 - [HTTP API](#http-api)
+- [Metadata](#metadata)
 - [Decoding](#decoding)
 - [Database Schema](#database-schema)
 - [Sync Architecture](#sync-architecture)
@@ -457,7 +458,11 @@ Views are auto-prefixed with `analytics_{chainId}` when using `engine=clickhouse
 curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
 ```
 
-## ERC20 Metadata
+## Metadata
+
+Supplementary tables that enrich on-chain data with off-chain context.
+
+### ERC20 Tokens
 
 The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 contract that has emitted a Transfer within the indexed range. Two stages:
 
@@ -466,6 +471,15 @@ The `erc20_tokens` table holds `name`, `symbol`, and `decimals` for every ERC20 
 - **Robustness** — `allowFailure: true` on every sub-call, plus a bytes32 fallback for legacy tokens (MKR/SAI).
 
 A new token appears as `pending` within sync latency (~2–12s) and flips to `ok` after the next resolution tick (≤60s).
+
+### Labels
+
+Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT collections, etc.) sourced from [eth-labels](https://github.com/dawsbot/eth-labels) and stored in two per-chain tables:
+
+- **`labels_accounts`** — EOAs and protocol contracts. Fields: `label` (project slug), `name_tag` (e.g. `"Binance: Hot Wallet 14"`).
+- **`labels_contracts`** — Tokens, NFT collections, and other named contracts with richer metadata (`name`, `symbol`, `website`, `image_url`).
+- **Opt-in at query time** via `?labels=true` on `/transactions`, `/erc20/transfers`, and `/erc20/approvals`. Absent addresses are omitted from the response's `labels` map. Contract hits take precedence over account hits for the same address.
+- **Seed/refresh** by running `tidx seed-labels [--chain-id N]` — one-shot, fetches HEAD of eth-labels' `v1` branch, filters per chain, `TRUNCATE + COPY` into the target DB.
 
 ## Decoding
 

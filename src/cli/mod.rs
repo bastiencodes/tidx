@@ -1,6 +1,7 @@
 pub mod backfill_receipt_data;
 pub mod init;
 pub mod query;
+pub mod seed_labels;
 pub mod seed_signatures;
 pub mod status;
 pub mod up;
@@ -34,6 +35,8 @@ pub enum Commands {
     BackfillReceiptData(backfill_receipt_data::Args),
     /// Load Sourcify signature cache into per-chain databases
     SeedSignatures(seed_signatures::Args),
+    /// Load eth-labels address/contract labels into per-chain databases
+    SeedLabels(seed_labels::Args),
     /// Update tidx to the latest version
     Upgrade,
 }
