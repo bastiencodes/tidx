@@ -11,7 +11,7 @@
 //! `source = 'trust_wallet'`). Enrichment is purely additive — on-chain
 //! `name`/`symbol`/`decimals` from Multicall3 stay source-of-truth; the
 //! token list adds `logo_url`, `website`, `description`, `explorer`,
-//! `tags`, `links`, and `trust_wallet_status`.
+//! `tags`, `links`, and `is_spam`.
 
 use std::time::Instant;
 
@@ -82,11 +82,10 @@ pub struct Erc20Token {
     tags: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     links: Option<serde_json::Value>,
-    /// Trust Wallet's `status` field: `active` | `spam` | `abandoned`.
-    /// Sets up future filters like `?exclude_spam=true` without needing
-    /// a follow-up API shape change.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trust_wallet_status: Option<String>,
+    /// `true` when Trust Wallet flagged the token as `spam`. Tokens not
+    /// listed by Trust Wallet, or listed as `active` / `abandoned`, are
+    /// `false` — "abandoned" means the project is stale, not malicious.
+    is_spam: bool,
 }
 
 #[derive(Serialize)]
@@ -247,7 +246,10 @@ fn row_to_token(row: &tokio_postgres::Row) -> Erc20Token {
         website: row.get(12),
         description: row.get(13),
         explorer: row.get(14),
-        trust_wallet_status: row.get(15),
+        is_spam: row
+            .get::<_, Option<String>>(15)
+            .as_deref()
+            == Some("spam"),
         tags: row.get(16),
         links: row.get(17),
     }
