@@ -41,8 +41,6 @@ pub enum SearchResult {
         address: String,
         symbol: Option<String>,
         name: Option<String>,
-        #[serde(rename = "isTip20")]
-        is_tip20: bool,
         /// `true` only when Trust Wallet lists the token with `status = "active"`.
         is_verified: bool,
     },
@@ -145,7 +143,6 @@ pub async fn search(
                     address: hex_prefixed(&bytes),
                     name: row.get(0),
                     symbol: row.get(1),
-                    is_tip20: true,
                     is_verified: row.get(2),
                 });
             }
@@ -193,7 +190,6 @@ pub async fn search(
                     address: hex_prefixed(&addr),
                     name: row.get(1),
                     symbol: row.get(2),
-                    is_tip20: true,
                     is_verified: row.get(3),
                 });
             }
