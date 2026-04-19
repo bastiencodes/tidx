@@ -511,6 +511,31 @@ Human-readable tags for known addresses (exchanges, bridges, DEX routers, NFT co
 - **Opt-in at query time** via `?labels=true` on `/transactions`, `/erc20/transfers`, and `/erc20/approvals`. Addresses with no match are omitted from the response's `labels` map. Contract hits are listed before account hits.
 - **Seed/refresh** by running `tidx seed-labels [--chain-id N]` — one-shot, fetches HEAD of eth-labels' `v1` branch, filters per chain, `TRUNCATE + COPY` into the target DB.
 
+#### ENS
+
+Self-sovereign primary names sourced from the ENS Registry on the indexed chain itself (not a third-party feed). Stored in one per-chain table:
+
+- **`ens_records`** — `(address, name, verified, resolved_at, resolved_block)`. Negative cache (`name = NULL`) included so addresses with no primary name don't get re-resolved every request.
+- **`verified`** — `true` when forward resolution of `name` returns the same address. This is the ENS-standard anti-impersonation check: reverse records are self-declared, so a bare address → name read isn't authoritative until the name forward-resolves back to that address. Mainstream libraries (viem, ethers) apply the same check.
+- **Opt-in at query time** via `?ens=true` on `/transactions` and `/transactions/:hash` (including `?include_logs=true`). On the tx, the `ens` map is keyed by `from`/`to`/`contract_address`; on a log it's a single optional name for the emitting address. Addresses with no primary name are omitted. Follow-up: the same opt-in on `/erc20/transfers` and `/erc20/approvals`.
+- **Relationship with `?labels=true`** — orthogonal. Labels are a curated third-party taxonomy (multi-tag); ENS is self-sovereign identity (single name, forward-verified). Both can be requested together and are returned under separate top-level keys.
+- **Cache & staleness** — populated lazily on `?ens=true` misses via Multicall3 against this chain's RPC. Four batched reads per uncached address: reverse resolver, `.name()`, forward resolver, `.addr()`. Rows are refreshed when `now - resolved_at > stale_after_secs` (default 24h); `verified` is therefore a **point-in-time assertion** and may be up to 24h out of date. In particular, if an ENS name is transferred to a new owner within the TTL window, `verified: true` can briefly lag onchain truth — see [src/ens.rs](src/ens.rs) module docstring for the worked example. Callers whose UX depends on authoritative identity should resolve against RPC directly rather than through this cache.
+
+Mainnet only in v1 (ENS has its own registry deployment on Sepolia which isn't wired yet). Config:
+
+```toml
+[[chains]]
+chain_id = 1
+# ...
+
+[chains.ens]
+enabled = true                   # default: false
+# registry = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e"   # default: mainnet
+# stale_after_secs = 86400                                  # default: 24h
+```
+
+Omitting `[chains.ens]` entirely (or setting `enabled = false`) makes `?ens=true` a silent no-op on that chain — the param is accepted but no enrichment runs.
+
 ## Decoding
 
 Resolves function selectors and event topic0s to canonical text signatures

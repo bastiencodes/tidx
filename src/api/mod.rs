@@ -36,6 +36,11 @@ use crate::service::{QueryOptions, QueryResult, SyncStatus};
 
 pub type SharedPools = Arc<RwLock<HashMap<u64, Pool>>>;
 pub type SharedClickHouseEngines = Arc<RwLock<HashMap<u64, Arc<ClickHouseEngine>>>>;
+/// Per-chain ENS runtime state (config + dedicated low-concurrency RPC client).
+/// Chains with `[chains.ens]` absent or `enabled = false` have no entry, and
+/// the `?ens=true` path short-circuits to empty for them — so chains without
+/// ENS don't pay for an unused `RpcClient` allocation either.
+pub type SharedEnsState = Arc<RwLock<HashMap<u64, crate::ens::EnsRuntimeState>>>;
 
 /// Per-chain ClickHouse configuration.
 #[derive(Clone, Debug, Default)]
@@ -61,6 +66,9 @@ pub struct AppState {
     pub clickhouse_engines: SharedClickHouseEngines,
     /// Map of chain_id -> display name (hot-reloadable, from ChainConfig.name)
     pub chain_names: SharedChainNames,
+    /// Per-chain ENS runtime state. Chains absent from the map have ENS
+    /// disabled. The `?ens=true` path is a silent no-op on those chains.
+    pub ens_state: SharedEnsState,
     /// Parsed trusted CIDRs for admin operations
     pub trusted_cidrs: Arc<Vec<(IpAddr, u8)>>,
 }
@@ -126,7 +134,15 @@ fn ip_in_cidr(ip: &IpAddr, network: &IpAddr, prefix_len: u8) -> bool {
 }
 
 pub fn router(pools: HashMap<u64, Pool>, default_chain_id: u64, broadcaster: Arc<Broadcaster>) -> Router<()> {
-    router_with_options(pools, default_chain_id, broadcaster, HashMap::new(), HashMap::new(), &HttpConfig::default())
+    router_with_options(
+        pools,
+        default_chain_id,
+        broadcaster,
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        &HttpConfig::default(),
+    )
 }
 
 pub fn router_with_options(
@@ -135,6 +151,7 @@ pub fn router_with_options(
     broadcaster: Arc<Broadcaster>,
     clickhouse_configs: HashMap<u64, ChainClickHouseConfig>,
     chain_names: HashMap<u64, String>,
+    ens_state: HashMap<u64, crate::ens::EnsRuntimeState>,
     http_config: &HttpConfig,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&http_config.trusted_cidrs));
@@ -146,6 +163,7 @@ pub fn router_with_options(
         clickhouse_configs: Arc::new(RwLock::new(clickhouse_configs)),
         clickhouse_engines: Arc::new(RwLock::new(HashMap::new())),
         chain_names: Arc::new(RwLock::new(chain_names)),
+        ens_state: Arc::new(RwLock::new(ens_state)),
         trusted_cidrs,
     };
 
@@ -159,6 +177,7 @@ pub fn router_shared(
     clickhouse_configs: SharedClickHouseConfigs,
     clickhouse_engines: SharedClickHouseEngines,
     chain_names: SharedChainNames,
+    ens_state: SharedEnsState,
     trusted_cidrs: Vec<String>,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&trusted_cidrs));
@@ -170,6 +189,7 @@ pub fn router_shared(
         clickhouse_configs,
         clickhouse_engines,
         chain_names,
+        ens_state,
         trusted_cidrs,
     };
 

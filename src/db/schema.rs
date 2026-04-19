@@ -36,6 +36,7 @@ pub async fn run_migrations(pool: &Pool) -> Result<()> {
     conn.batch_execute(include_str!("../../db/signatures.sql")).await?;
     conn.batch_execute(include_str!("../../db/labels_accounts.sql")).await?;
     conn.batch_execute(include_str!("../../db/labels_contracts.sql")).await?;
+    conn.batch_execute(include_str!("../../db/ens_records.sql")).await?;
     conn.batch_execute(include_str!("../../db/functions.sql")).await?;
 
     // Load any optional extensions

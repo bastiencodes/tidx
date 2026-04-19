@@ -23,11 +23,13 @@
 //!                                                 / `error`). Not compatible
 //!                                                 with `block=`, `address=`,
 //!                                                 or pagination params.
-//!                                                 Accepts `&decode=true` and
-//!                                                 `&labels=true` to populate
-//!                                                 `decoded` / `labels` on each
-//!                                                 streamed tx (same semantics
-//!                                                 as the non-live path).
+//!                                                 Accepts `&decode=true`,
+//!                                                 `&labels=true`, and
+//!                                                 `&ens=true` to populate
+//!                                                 `decoded` / `labels` / `ens`
+//!                                                 on each streamed tx (same
+//!                                                 semantics as the non-live
+//!                                                 path).
 //! `GET /transactions/:hash?chainId=X`           — single transaction by
 //!                                                 0x-prefixed 32-byte hash,
 //!                                                 joined with its receipt.
@@ -43,6 +45,11 @@
 //!                                                 each log's emitting
 //!                                                 `address` is resolved against
 //!                                                 the `labels_*` tables.
+//!                                                 `&ens=true` reverse-resolves
+//!                                                 `from`/`to`/`contract_address`
+//!                                                 on the tx, and (with
+//!                                                 `&include_logs=true`) the
+//!                                                 emitting address of each log.
 
 use std::convert::Infallible;
 use std::time::Instant;
@@ -82,6 +89,11 @@ pub struct TransactionsParams {
     /// Populate `labels` on each tx using the `labels_*` tables.
     #[serde(default)]
     labels: bool,
+    /// Populate `ens` on each tx by reverse-resolving `from`/`to`/
+    /// `contract_address` against the ENS registry on this chain. Silently
+    /// ignored when ENS is not enabled for the chain (`[chains.ens]`).
+    #[serde(default)]
+    ens: bool,
 }
 
 /// Cursor for the LATEST path (`ORDER BY block_num DESC, idx DESC`).
@@ -141,6 +153,12 @@ pub struct Transaction {
     /// `["uniswap", "dex"]` or `["tornado-cash", "blocked"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<std::collections::BTreeMap<&'static str, Vec<crate::labels::Label>>>,
+    /// Present only when the caller set `?ens=true` and the chain has ENS
+    /// enabled. Keys (`from`, `to`, `contract_address`) are omitted when the
+    /// address has no resolvable primary name. Each value is a single name
+    /// with a `verified` flag — see `crate::ens` for staleness semantics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ens: Option<std::collections::BTreeMap<&'static str, crate::ens::EnsName>>,
     /// Present only when the caller set `?include_logs=true` on the detail
     /// endpoint. Ordered by `log_idx` ascending. Empty vec means the tx
     /// emitted no logs.
@@ -167,6 +185,11 @@ pub struct Log {
     /// had no label; otherwise one entry per tag (e.g. `["uniswap", "dex"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     labels: Option<Vec<crate::labels::Label>>,
+    /// Present only when the caller set both `?ens=true` and
+    /// `?include_logs=true`. Inner `None` means the emitting address has no
+    /// resolvable primary name; `Some` carries the name + `verified` flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ens: Option<Option<crate::ens::EnsName>>,
 }
 
 #[derive(Serialize)]
@@ -318,6 +341,11 @@ async fn handle_once(
     }
     if params.labels {
         attach_labels(&pool, &rows, &mut transactions).await;
+    }
+    if params.ens {
+        if let Some(s) = ens_context(&state, params.chain_id).await {
+            attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
+        }
     }
     let count = transactions.len();
     let next_cursor = next_cursor_for(&transactions, limit, variant);
@@ -559,6 +587,7 @@ fn row_to_tx(row: &tokio_postgres::Row) -> Transaction {
         status: row.get(17),
         decoded: None,
         labels: None,
+        ens: None,
         logs: None,
     }
 }
@@ -623,6 +652,82 @@ async fn attach_labels(
     }
 }
 
+/// Mirror of [`attach_labels`] for the `?ens=true` enrichment path. Collects
+/// unique from/to/contract_address bytes across `rows`, calls
+/// [`crate::ens::lookup_batch`] once, and populates each tx's `ens` field
+/// with the subset of those three keys that have a resolvable primary name.
+/// Addresses with no ENS name are omitted from the per-tx map (same
+/// convention as `labels`); the outer `ens: {}` key is always present so
+/// callers can tell enrichment ran.
+async fn attach_ens(
+    pool: &crate::db::Pool,
+    rpc: &crate::sync::fetcher::RpcClient,
+    ens_config: &crate::ens::EnsConfig,
+    rows: &[tokio_postgres::Row],
+    txs: &mut [Transaction],
+) {
+    let mut addrs: Vec<[u8; 20]> = Vec::with_capacity(rows.len() * 3);
+    for row in rows {
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            addrs.push(a);
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                addrs.push(a);
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                addrs.push(a);
+            }
+        }
+    }
+
+    let map = crate::ens::lookup_batch(pool, rpc, &addrs, ens_config).await;
+
+    for (row, tx) in rows.iter().zip(txs.iter_mut()) {
+        let mut ens: std::collections::BTreeMap<&'static str, crate::ens::EnsName> =
+            std::collections::BTreeMap::new();
+        let from: Vec<u8> = row.get(4);
+        if let Ok(a) = <[u8; 20]>::try_from(from.as_slice()) {
+            if let Some(n) = map.get(&a) {
+                ens.insert("from", n.clone());
+            }
+        }
+        let to: Option<Vec<u8>> = row.get(5);
+        if let Some(t) = to {
+            if let Ok(a) = <[u8; 20]>::try_from(t.as_slice()) {
+                if let Some(n) = map.get(&a) {
+                    ens.insert("to", n.clone());
+                }
+            }
+        }
+        let contract: Option<Vec<u8>> = row.get(16);
+        if let Some(c) = contract {
+            if let Ok(a) = <[u8; 20]>::try_from(c.as_slice()) {
+                if let Some(n) = map.get(&a) {
+                    ens.insert("contract_address", n.clone());
+                }
+            }
+        }
+        tx.ens = Some(ens);
+    }
+}
+
+/// Reads the ENS runtime state for `chain_id` from `AppState`. Returns
+/// `None` when the chain has ENS disabled — enrichment call sites
+/// short-circuit to a silent no-op in that case.
+async fn ens_context(state: &AppState, chain_id: u64) -> Option<crate::ens::EnsRuntimeState> {
+    let s = state.ens_state.read().await.get(&chain_id).cloned()?;
+    if !s.config.enabled {
+        return None;
+    }
+    Some(s)
+}
+
 type SseStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
 
 /// Maximum blocks to catch up in a single update (prevents query multiplication).
@@ -636,6 +741,14 @@ async fn handle_live(
 
     let pool = state.get_pool(Some(chain_id)).await;
     let mut rx = state.broadcaster.subscribe();
+    // Pre-read the ENS context so the stream closure doesn't reach back into
+    // state on every tick. Tuple is `None` when ENS is disabled for this
+    // chain — `params.ens` becomes a silent no-op in that case.
+    let ens_ctx = if params.ens {
+        ens_context(&state, chain_id).await
+    } else {
+        None
+    };
 
     let stream = async_stream::stream! {
         let Some(pool) = pool else {
@@ -675,6 +788,9 @@ async fn handle_live(
                     }
                     if params.labels {
                         attach_labels(&pool, &rows, &mut transactions).await;
+                    }
+                    if let Some(s) = &ens_ctx {
+                        attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
                     }
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
@@ -753,6 +869,9 @@ async fn handle_live(
                                 if params.labels {
                                     attach_labels(&pool, &rows, &mut transactions).await;
                                 }
+                                if let Some(s) = &ens_ctx {
+                                    attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
+                                }
                                 let count = transactions.len();
                                 let resp = TransactionsResponse {
                                     ok: true,
@@ -811,6 +930,11 @@ pub struct TransactionDetailParams {
     /// Populate `labels` on the tx using the `labels_*` tables.
     #[serde(default)]
     labels: bool,
+    /// Populate `ens` on the tx (and each log when `?include_logs=true`) by
+    /// reverse-resolving against the ENS registry on this chain. Silently
+    /// ignored when ENS is not enabled for the chain.
+    #[serde(default)]
+    ens: bool,
     /// Populate `logs` on the tx by fetching from the `logs` table.
     #[serde(default, alias = "includeLogs")]
     include_logs: bool,
@@ -855,6 +979,14 @@ pub async fn get_transaction(
     }
     if params.labels {
         attach_labels(&pool, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
+    }
+    let ens_ctx = if params.ens {
+        ens_context(&state, params.chain_id).await
+    } else {
+        None
+    };
+    if let Some(s) = &ens_ctx {
+        attach_ens(&pool, &s.rpc, &s.config, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
     if params.include_logs {
         let log_rows = conn
@@ -905,6 +1037,24 @@ pub async fn get_transaction(
             }
         }
 
+        if let Some(s) = &ens_ctx {
+            let log_addrs: Vec<[u8; 20]> = log_rows
+                .iter()
+                .filter_map(|r| {
+                    let a: Vec<u8> = r.get(1);
+                    <[u8; 20]>::try_from(a.as_slice()).ok()
+                })
+                .collect();
+            let map = crate::ens::lookup_batch(&pool, &s.rpc, &log_addrs, &s.config).await;
+            for (log, row) in logs.iter_mut().zip(log_rows.iter()) {
+                let a: Vec<u8> = row.get(1);
+                let name = <[u8; 20]>::try_from(a.as_slice())
+                    .ok()
+                    .and_then(|k| map.get(&k).cloned());
+                log.ens = Some(name);
+            }
+        }
+
         transaction.logs = Some(logs);
     }
 
@@ -944,6 +1094,7 @@ fn log_row_to_log(row: &tokio_postgres::Row) -> Log {
         data: hex_prefixed(&data),
         decoded: None,
         labels: None,
+        ens: None,
     }
 }
 

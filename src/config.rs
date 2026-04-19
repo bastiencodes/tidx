@@ -202,6 +202,12 @@ pub struct ChainConfig {
     /// ClickHouse OLAP settings (for analytical queries)
     #[serde(default)]
     pub clickhouse: Option<ClickHouseConfig>,
+
+    /// ENS reverse-resolution enrichment (`?ens=true` on `/transactions`
+    /// et al). Disabled by default; enable per-chain via `[chains.ens]`.
+    /// See [`crate::ens::EnsConfig`] for field docs.
+    #[serde(default)]
+    pub ens: Option<crate::ens::EnsConfig>,
 }
 
 /// Configuration for ClickHouse OLAP engine
@@ -519,6 +525,7 @@ mod tests {
             api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
+            ens: None,
         };
 
         assert_eq!(
@@ -545,6 +552,7 @@ mod tests {
             api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
+            ens: None,
         };
 
         let resolved = config.resolved_pg_url().unwrap();
@@ -622,6 +630,7 @@ mod tests {
             api_pg_url: None,
             api_pg_password_env: None,
             clickhouse: None,
+            ens: None,
         };
 
         assert!(config.resolved_pg_url().is_err());
