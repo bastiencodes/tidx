@@ -343,8 +343,8 @@ async fn handle_once(
         attach_labels(&pool, &rows, &mut transactions).await;
     }
     if params.ens {
-        if let Some((rpc, cfg)) = ens_context(&state, params.chain_id).await {
-            attach_ens(&pool, &rpc, &cfg, &rows, &mut transactions).await;
+        if let Some(s) = ens_context(&state, params.chain_id).await {
+            attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
         }
     }
     let count = transactions.len();
@@ -717,19 +717,15 @@ async fn attach_ens(
     }
 }
 
-/// Reads the RPC client and ENS config for `chain_id` from `AppState`.
-/// Returns `None` when either is absent — the chain has ENS disabled or
-/// isn't wired yet — so enrichment call sites can short-circuit cleanly.
-async fn ens_context(
-    state: &AppState,
-    chain_id: u64,
-) -> Option<(crate::sync::fetcher::RpcClient, crate::ens::EnsConfig)> {
-    let rpc = state.rpc_clients.read().await.get(&chain_id).cloned()?;
-    let cfg = state.ens_configs.read().await.get(&chain_id).cloned()?;
-    if !cfg.enabled {
+/// Reads the ENS runtime state for `chain_id` from `AppState`. Returns
+/// `None` when the chain has ENS disabled — enrichment call sites
+/// short-circuit to a silent no-op in that case.
+async fn ens_context(state: &AppState, chain_id: u64) -> Option<crate::ens::EnsRuntimeState> {
+    let s = state.ens_state.read().await.get(&chain_id).cloned()?;
+    if !s.config.enabled {
         return None;
     }
-    Some((rpc, cfg))
+    Some(s)
 }
 
 type SseStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
@@ -793,8 +789,8 @@ async fn handle_live(
                     if params.labels {
                         attach_labels(&pool, &rows, &mut transactions).await;
                     }
-                    if let Some((rpc, cfg)) = &ens_ctx {
-                        attach_ens(&pool, rpc, cfg, &rows, &mut transactions).await;
+                    if let Some(s) = &ens_ctx {
+                        attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
                     }
                     let latest = transactions.first().map(|t| t.block_number).unwrap_or(0);
                     let count = transactions.len();
@@ -873,8 +869,8 @@ async fn handle_live(
                                 if params.labels {
                                     attach_labels(&pool, &rows, &mut transactions).await;
                                 }
-                                if let Some((rpc, cfg)) = &ens_ctx {
-                                    attach_ens(&pool, rpc, cfg, &rows, &mut transactions).await;
+                                if let Some(s) = &ens_ctx {
+                                    attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
                                 }
                                 let count = transactions.len();
                                 let resp = TransactionsResponse {
@@ -989,8 +985,8 @@ pub async fn get_transaction(
     } else {
         None
     };
-    if let Some((rpc, cfg)) = &ens_ctx {
-        attach_ens(&pool, rpc, cfg, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
+    if let Some(s) = &ens_ctx {
+        attach_ens(&pool, &s.rpc, &s.config, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
     if params.include_logs {
         let log_rows = conn
@@ -1041,7 +1037,7 @@ pub async fn get_transaction(
             }
         }
 
-        if let Some((rpc, cfg)) = &ens_ctx {
+        if let Some(s) = &ens_ctx {
             let log_addrs: Vec<[u8; 20]> = log_rows
                 .iter()
                 .filter_map(|r| {
@@ -1049,7 +1045,7 @@ pub async fn get_transaction(
                     <[u8; 20]>::try_from(a.as_slice()).ok()
                 })
                 .collect();
-            let map = crate::ens::lookup_batch(&pool, rpc, &log_addrs, cfg).await;
+            let map = crate::ens::lookup_batch(&pool, &s.rpc, &log_addrs, &s.config).await;
             for (log, row) in logs.iter_mut().zip(log_rows.iter()) {
                 let a: Vec<u8> = row.get(1);
                 let name = <[u8; 20]>::try_from(a.as_slice())

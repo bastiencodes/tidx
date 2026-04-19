@@ -36,12 +36,11 @@ use crate::service::{QueryOptions, QueryResult, SyncStatus};
 
 pub type SharedPools = Arc<RwLock<HashMap<u64, Pool>>>;
 pub type SharedClickHouseEngines = Arc<RwLock<HashMap<u64, Arc<ClickHouseEngine>>>>;
-/// Per-chain JSON-RPC clients. Populated at chain init from `ChainConfig.rpc_url`
-/// and used by enrichment paths that need live onchain reads (e.g. `?ens=true`).
-pub type SharedRpcClients = Arc<RwLock<HashMap<u64, crate::sync::fetcher::RpcClient>>>;
-/// Per-chain ENS config. Chains with `[chains.ens]` absent or `enabled = false`
-/// have no entry here, and the `?ens=true` path short-circuits to empty for them.
-pub type SharedEnsConfigs = Arc<RwLock<HashMap<u64, crate::ens::EnsConfig>>>;
+/// Per-chain ENS runtime state (config + dedicated low-concurrency RPC client).
+/// Chains with `[chains.ens]` absent or `enabled = false` have no entry, and
+/// the `?ens=true` path short-circuits to empty for them — so chains without
+/// ENS don't pay for an unused `RpcClient` allocation either.
+pub type SharedEnsState = Arc<RwLock<HashMap<u64, crate::ens::EnsRuntimeState>>>;
 
 /// Per-chain ClickHouse configuration.
 #[derive(Clone, Debug, Default)]
@@ -67,11 +66,9 @@ pub struct AppState {
     pub clickhouse_engines: SharedClickHouseEngines,
     /// Map of chain_id -> display name (hot-reloadable, from ChainConfig.name)
     pub chain_names: SharedChainNames,
-    /// Per-chain JSON-RPC clients for enrichment paths that need live reads
-    /// (currently `?ens=true`).
-    pub rpc_clients: SharedRpcClients,
-    /// Per-chain ENS config. Chains absent from the map have ENS disabled.
-    pub ens_configs: SharedEnsConfigs,
+    /// Per-chain ENS runtime state. Chains absent from the map have ENS
+    /// disabled. The `?ens=true` path is a silent no-op on those chains.
+    pub ens_state: SharedEnsState,
     /// Parsed trusted CIDRs for admin operations
     pub trusted_cidrs: Arc<Vec<(IpAddr, u8)>>,
 }
@@ -144,7 +141,6 @@ pub fn router(pools: HashMap<u64, Pool>, default_chain_id: u64, broadcaster: Arc
         HashMap::new(),
         HashMap::new(),
         HashMap::new(),
-        HashMap::new(),
         &HttpConfig::default(),
     )
 }
@@ -155,8 +151,7 @@ pub fn router_with_options(
     broadcaster: Arc<Broadcaster>,
     clickhouse_configs: HashMap<u64, ChainClickHouseConfig>,
     chain_names: HashMap<u64, String>,
-    rpc_clients: HashMap<u64, crate::sync::fetcher::RpcClient>,
-    ens_configs: HashMap<u64, crate::ens::EnsConfig>,
+    ens_state: HashMap<u64, crate::ens::EnsRuntimeState>,
     http_config: &HttpConfig,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&http_config.trusted_cidrs));
@@ -168,8 +163,7 @@ pub fn router_with_options(
         clickhouse_configs: Arc::new(RwLock::new(clickhouse_configs)),
         clickhouse_engines: Arc::new(RwLock::new(HashMap::new())),
         chain_names: Arc::new(RwLock::new(chain_names)),
-        rpc_clients: Arc::new(RwLock::new(rpc_clients)),
-        ens_configs: Arc::new(RwLock::new(ens_configs)),
+        ens_state: Arc::new(RwLock::new(ens_state)),
         trusted_cidrs,
     };
 
@@ -183,8 +177,7 @@ pub fn router_shared(
     clickhouse_configs: SharedClickHouseConfigs,
     clickhouse_engines: SharedClickHouseEngines,
     chain_names: SharedChainNames,
-    rpc_clients: SharedRpcClients,
-    ens_configs: SharedEnsConfigs,
+    ens_state: SharedEnsState,
     trusted_cidrs: Vec<String>,
 ) -> Router<()> {
     let trusted_cidrs = Arc::new(parse_cidrs(&trusted_cidrs));
@@ -196,8 +189,7 @@ pub fn router_shared(
         clickhouse_configs,
         clickhouse_engines,
         chain_names,
-        rpc_clients,
-        ens_configs,
+        ens_state,
         trusted_cidrs,
     };
 

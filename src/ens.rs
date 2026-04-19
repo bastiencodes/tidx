@@ -104,6 +104,20 @@ impl Default for EnsConfig {
     }
 }
 
+/// Bundles the ENS config + the RPC client used to resolve names for a
+/// chain. Held by `AppState` behind a single `SharedEnsState` map —
+/// chains without ENS enabled have no entry, so there's no wasted
+/// `RpcClient` allocation for chains that won't ever use it.
+///
+/// The RPC client is constructed with low concurrency (matching the ERC20
+/// metadata worker, see `src/cli/up.rs`) so enrichment reads don't
+/// contend with the sync engine's block-range fetches.
+#[derive(Clone)]
+pub struct EnsRuntimeState {
+    pub config: EnsConfig,
+    pub rpc: RpcClient,
+}
+
 /// ENS enrichment payload for one address. Serialized under the top-level
 /// `ens` map on `/transactions`, `/erc20/transfers`, etc.
 #[derive(Debug, Clone, Serialize)]
