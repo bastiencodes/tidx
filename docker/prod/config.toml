@@ -13,10 +13,10 @@ enabled = true
 port = 9090
 
 [[chains]]
-name = "moderato"
-chain_id = 42431
-rpc_url = "${TIDX_RPC_URL_MODERATO}"
-pg_url = "postgres://tidx:tidx@postgres:5432/tidx_moderato"
+name = "mainnet"
+chain_id = 1
+rpc_url = "${TIDX_RPC_URL_MAINNET}"
+pg_url = "postgres://tidx:tidx@postgres:5432/tidx_mainnet"
 backfill = true
 batch_size = 100
 
@@ -26,10 +26,10 @@ enabled = true
 url = "http://clickhouse:8123"
 
 [[chains]]
-name = "mainnet"
-chain_id = 4217
-rpc_url = "${TIDX_RPC_URL_MAINNET}"
-pg_url = "postgres://tidx:tidx@postgres:5432/tidx_mainnet"
+name = "sepolia"
+chain_id = 11155111
+rpc_url = "${TIDX_RPC_URL_SEPOLIA}"
+pg_url = "postgres://tidx:tidx@postgres:5432/tidx_sepolia"
 backfill = true
 batch_size = 100
 
