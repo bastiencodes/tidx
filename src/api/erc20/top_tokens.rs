@@ -42,6 +42,7 @@ pub struct TopToken {
     symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decimals: Option<i16>,
+    logo_url: Option<String>,
     transfer_count: i64,
 }
 
@@ -129,6 +130,7 @@ pub async fn list_top_tokens(
                 name: meta.and_then(|m| m.name.clone()),
                 symbol: meta.and_then(|m| m.symbol.clone()),
                 decimals: meta.and_then(|m| m.decimals),
+                logo_url: meta.and_then(|m| m.logo_url.clone()),
                 transfer_count,
             }
         })
@@ -157,6 +159,7 @@ struct Metadata {
     name: Option<String>,
     symbol: Option<String>,
     decimals: Option<i16>,
+    logo_url: Option<String>,
 }
 
 /// Batch lookup name/symbol/decimals for the ranked addresses. Best-effort:
@@ -192,12 +195,20 @@ async fn fetch_metadata(
     };
 
     let byte_refs: Vec<&[u8]> = addrs.iter().map(|a| a.as_slice()).collect();
+    // LEFT JOIN `token_list` (see `src/api/erc20/transfers.rs`) so the
+    // Trust Wallet `logo_uri` rides along when available without dropping
+    // tokens that aren't listed.
+    let chain_id_i64 = chain_id as i64;
     let rows = match conn
         .query(
-            "SELECT address, name, symbol, decimals
-             FROM erc20_tokens
-             WHERE address = ANY($1)",
-            &[&byte_refs],
+            "SELECT t.address, t.name, t.symbol, t.decimals, tl.logo_uri
+             FROM erc20_tokens t
+             LEFT JOIN token_list tl
+               ON tl.source = 'trust_wallet'
+              AND tl.chain_id = $1
+              AND tl.address = t.address
+             WHERE t.address = ANY($2)",
+            &[&chain_id_i64, &byte_refs],
         )
         .await
     {
@@ -216,6 +227,7 @@ async fn fetch_metadata(
                 name: row.get(1),
                 symbol: row.get(2),
                 decimals: row.get(3),
+                logo_url: row.get(4),
             },
         );
     }
