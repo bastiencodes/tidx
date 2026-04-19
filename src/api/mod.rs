@@ -193,6 +193,7 @@ fn build_router(state: AppState) -> Router<()> {
         .route("/transactions/{hash}", get(transactions::get_transaction))
         .route("/erc20/approvals", get(erc20::approvals::list_approvals))
         .route("/erc20/tokens", get(erc20::tokens::list_tokens))
+        .route("/erc20/top-tokens", get(erc20::top_tokens::list_top_tokens))
         .route("/erc20/transfers", get(erc20::transfers::list_transfers))
         .route("/search", get(search::search))
         .route("/views", get(views::list_views).post(views::create_view))
