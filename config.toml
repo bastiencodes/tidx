@@ -28,6 +28,10 @@ url = "http://clickhouse:8123"
 # user = "default"
 # password_env = "CH_PASSWORD"
 
+# ENS reverse-resolution enrichment (opt-in per request via `?ens=true`).
+[chains.ens]
+enabled = true
+
 [[chains]]
 name = "sepolia"
 chain_id = 11155111
