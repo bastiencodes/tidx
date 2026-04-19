@@ -17,7 +17,7 @@
 
 ---
 
-**tidx** indexes [Tempo](https://tempo.xyz) chain data into a hybrid PostgreSQL + ClickHouse architecture for fast point lookups (OLTP) and lightning-fast analytics (OLAP). 
+**tidx** indexes EVM chain data into a hybrid PostgreSQL + ClickHouse architecture for fast point lookups (OLTP) and lightning-fast analytics (OLAP). 
 
 ## Features
 
@@ -81,23 +81,23 @@ The sync engine writes to both PostgreSQL and ClickHouse in parallel. Use the `e
 ```bash
 # PostgreSQL (OLTP) - last 10 transfers from an address
 curl "https://tidx.example.com/query \
-  ?chainId=4217 \
+  ?chainId=1 \
   &signature=Transfer(address,address,uint256) \
   &sql=SELECT * FROM Transfer WHERE from = '0x...' ORDER BY block_num DESC LIMIT 10"
 
 # ClickHouse (OLAP) - same query, faster for large scans
 curl "https://tidx.example.com/query \
-  ?chainId=4217 \
+  ?chainId=1 \
   &engine=clickhouse \
   &signature=Transfer(address,address,uint256) \
   &sql=SELECT * FROM Transfer WHERE from = '0x...' ORDER BY block_num DESC LIMIT 10"
 
 # ClickHouse (OLAP) - query pre-computed views
-curl "https://tidx.example.com/views?chainId=4217"
+curl "https://tidx.example.com/views?chainId=1"
 > {"ok":true,"views":[{"name":"top_holders","columns":[{"name":"token","type":"String"},{"name":"holder","type":"String"},{"name":"balance","type":"UInt256"}]}]}
 
 curl "https://tidx.example.com/query \
-  ?chainId=4217 \
+  ?chainId=1 \
   &engine=clickhouse \
   &sql=SELECT * FROM top_holders WHERE token = '0x...' LIMIT 10"
 ```
@@ -140,7 +140,7 @@ port = 9090
 
 [[chains]]
 name = "mainnet"
-chain_id = 4217
+chain_id = 1
 # `${VAR}` is expanded from the process env at config load time — keeps
 # credentials (basic-auth, API keys in path) out of the committed file.
 rpc_url = "${TIDX_RPC_URL_MAINNET}"
@@ -154,10 +154,10 @@ enabled = true
 url = "http://clickhouse:8123"
 
 [[chains]]
-name = "moderato"
-chain_id = 42431
-rpc_url = "https://rpc.testnet.tempo.xyz"
-pg_url = "postgres://user@tidx.example.com:5432/tidx_moderato"
+name = "sepolia"
+chain_id = 11155111
+rpc_url = "${TIDX_RPC_URL_SEPOLIA}"
+pg_url = "postgres://user@tidx.example.com:5432/tidx_sepolia"
 pg_password_env = "TIDX_PG_PASSWORD"
 ```
 
@@ -314,11 +314,11 @@ tidx query \
   "SELECT * FROM Transfer LIMIT 10"
 
 # List views
-tidx views --url https://tidx.example.com list --chain-id 4217
+tidx views --url https://tidx.example.com list --chain-id 1
 
 # Create a view (must be run from trusted IP)
 tidx views --url https://tidx.example.com create \
-  --chain-id 4217 \
+  --chain-id 1 \
   --name top_holders \
   --sql "SELECT holder, SUM(balance) as total FROM balances GROUP BY holder" \
   --order-by holder
@@ -335,16 +335,16 @@ tidx exposes a HTTP API for querying the indexer.
 
 ```bash
 # Point lookup (auto-routed to PostgreSQL)
-curl "https://tidx.example.com/query?chainId=4217&sql=SELECT * FROM blocks WHERE num = 12345"
+curl "https://tidx.example.com/query?chainId=1&sql=SELECT * FROM blocks WHERE num = 12345"
 > {"columns":["num","hash","timestamp"],"rows":[[12345,"0xabc...","2024-01-01T00:00:00Z"]],"row_count":1,"engine":"postgres","ok":true}
 
 # Aggregation (auto-routed to ClickHouse)
-curl "https://tidx.example.com/query?chainId=4217&sql=SELECT type, COUNT(*) FROM txs GROUP BY type"
+curl "https://tidx.example.com/query?chainId=1&sql=SELECT type, COUNT(*) FROM txs GROUP BY type"
 > {"columns":["type","count"],"rows":[[0,50000],[2,120000]],"row_count":2,"engine":"clickhouse","ok":true}
 
 # Status
 curl https://tidx.example.com/status
-> {"ok":true,"chains":[{"chain_id":4217,"synced_num":567890,"head_num":567890,"lag":0}]}
+> {"ok":true,"chains":[{"chain_id":1,"synced_num":567890,"head_num":567890,"lag":0}]}
 ```
 
 ### Reference
@@ -374,7 +374,7 @@ Manage ClickHouse materialized views for pre-computed analytics. Views are store
 #### List Views
 
 ```bash
-curl "https://tidx.example.com/views?chainId=42431"
+curl "https://tidx.example.com/views?chainId=11155111"
 ```
 
 ```json
@@ -384,7 +384,7 @@ curl "https://tidx.example.com/views?chainId=42431"
     {
       "name": "token_holders",
       "engine": "MaterializedView",
-      "database": "analytics_42431",
+      "database": "analytics_11155111",
       "columns": [
         {"name": "token", "type": "String"},
         {"name": "holder", "type": "String"},
@@ -401,7 +401,7 @@ curl "https://tidx.example.com/views?chainId=42431"
 curl -X POST "https://tidx.example.com/views" \
   -H "Content-Type: application/json" \
   -d '{
-    "chainId": 42431,
+    "chainId": 11155111,
     "name": "token_holders",
     "sql": "SELECT token, holder, sum(balance) AS balance FROM token_balances GROUP BY token, holder HAVING balance > 0",
     "orderBy": ["token", "holder"]
@@ -424,14 +424,14 @@ This creates:
 #### Get View Details
 
 ```bash
-curl "https://tidx.example.com/views/token_holders?chainId=42431"
+curl "https://tidx.example.com/views/token_holders?chainId=11155111"
 ```
 
 ```json
 {
   "ok": true,
-  "view": {"name": "token_holders", "engine": "View", "database": "analytics_42431"},
-  "definition": "CREATE VIEW analytics_42431.token_holders AS SELECT ...",
+  "view": {"name": "token_holders", "engine": "View", "database": "analytics_11155111"},
+  "definition": "CREATE VIEW analytics_11155111.token_holders AS SELECT ...",
   "row_count": 1234567
 }
 ```
@@ -439,7 +439,7 @@ curl "https://tidx.example.com/views/token_holders?chainId=42431"
 #### Delete View (trusted IP only)
 
 ```bash
-curl -X DELETE "https://tidx.example.com/views/token_holders?chainId=42431"
+curl -X DELETE "https://tidx.example.com/views/token_holders?chainId=11155111"
 ```
 
 ```json
@@ -455,7 +455,7 @@ Views are auto-prefixed with `analytics_{chainId}` when using `engine=clickhouse
 
 ```bash
 # Query the view (auto-prefixed)
-curl "https://tidx.example.com/query?chainId=42431&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
+curl "https://tidx.example.com/query?chainId=11155111&engine=clickhouse&sql=SELECT * FROM token_holders WHERE token = '0x...' ORDER BY balance DESC LIMIT 10"
 ```
 
 ## Metadata
