@@ -123,13 +123,14 @@ pub async fn run(args: Args) -> Result<()> {
             .insert(chain.chain_id, chain.name.clone());
 
         // Per-chain RPC client for enrichment paths that read onchain live
-        // (e.g. `?ens=true`). Shares rpc_url with the sync engine; separate
-        // client instance so enrichment load doesn't share a concurrency
-        // limiter with block-range fetches.
+        // (e.g. `?ens=true`). Uses the same low concurrency (2) as the
+        // ERC20 metadata worker — both do occasional Multicall3 reads, so
+        // we stay polite to the RPC provider and isolate enrichment load
+        // from the sync engine's block-range fetches.
         rpc_clients
             .write()
             .await
-            .insert(chain.chain_id, RpcClient::new(&chain.rpc_url));
+            .insert(chain.chain_id, RpcClient::with_concurrency(&chain.rpc_url, 2));
 
         if let Some(ref ens_cfg) = chain.ens {
             if ens_cfg.enabled {
@@ -227,7 +228,10 @@ pub async fn run(args: Args) -> Result<()> {
                         rpc_clients_for_watcher
                             .write()
                             .await
-                            .insert(event.chain.chain_id, RpcClient::new(&event.chain.rpc_url));
+                            .insert(
+                                event.chain.chain_id,
+                                RpcClient::with_concurrency(&event.chain.rpc_url, 2),
+                            );
                         if let Some(ref ens_cfg) = event.chain.ens {
                             if ens_cfg.enabled {
                                 ens_configs_for_watcher
