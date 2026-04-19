@@ -34,6 +34,19 @@ pub struct DecodedInput {
     #[serde(rename = "type")]
     pub ty: String,
     pub value: JsonValue,
+    /// Populated only for `type = "address"` inputs when the caller set
+    /// both `?decode=true` and `?ens=true` AND the chain has ENS enabled
+    /// AND the address has a resolvable primary name. Absence is
+    /// meaningful — we checked, there was nothing to attach.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ens: Option<crate::ens::EnsName>,
+    /// Populated only for `type = "address"` inputs when the caller set
+    /// both `?decode=true` and `?labels=true` AND the address has one or
+    /// more entries in the `labels_*` tables. Empty vec is never emitted
+    /// — we skip-serialize when there are no matches rather than send
+    /// `"labels": []`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<crate::labels::Label>>,
 }
 
 /// Decode a batch of `tx.input` blobs in one PG roundtrip.
@@ -128,6 +141,8 @@ fn try_decode_function(text_sig: &str, args: &[u8]) -> Option<Decoded> {
             .map(|(val, param)| DecodedInput {
                 ty: param.ty.clone(),
                 value: value_to_json(val),
+                ens: None,
+                labels: None,
             })
             .collect(),
     })
@@ -259,6 +274,8 @@ fn try_decode_event(text_sig: &str, ev: &EventInput) -> Option<Decoded> {
             Some(DecodedInput {
                 ty: p.ty.clone(),
                 value: value_to_json(val),
+                ens: None,
+                labels: None,
             })
         })
         .collect::<Option<Vec<_>>>()?;

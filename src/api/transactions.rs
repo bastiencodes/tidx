@@ -331,6 +331,11 @@ async fn handle_once(
     };
 
     let mut transactions: Vec<Transaction> = rows.iter().map(row_to_tx).collect();
+    let ens_ctx = if params.ens {
+        ens_context(&state, params.chain_id).await
+    } else {
+        None
+    };
     if params.decode {
         let raw_inputs: Vec<Vec<u8>> = rows.iter().map(|r| r.get::<_, Vec<u8>>(9)).collect();
         let input_refs: Vec<&[u8]> = raw_inputs.iter().map(|v| v.as_slice()).collect();
@@ -338,14 +343,17 @@ async fn handle_once(
         for (tx, d) in transactions.iter_mut().zip(decoded) {
             tx.decoded = Some(d);
         }
+        let decodeds: Vec<&mut crate::decoder::Decoded> = transactions
+            .iter_mut()
+            .filter_map(|tx| tx.decoded.as_mut().and_then(|o| o.as_mut()))
+            .collect();
+        enrich_decoded_inputs(&pool, ens_ctx.as_ref(), params.labels, decodeds).await;
     }
     if params.labels {
         attach_labels(&pool, &rows, &mut transactions).await;
     }
-    if params.ens {
-        if let Some(s) = ens_context(&state, params.chain_id).await {
-            attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
-        }
+    if let Some(s) = &ens_ctx {
+        attach_ens(&pool, &s.rpc, &s.config, &rows, &mut transactions).await;
     }
     let count = transactions.len();
     let next_cursor = next_cursor_for(&transactions, limit, variant);
@@ -717,6 +725,87 @@ async fn attach_ens(
     }
 }
 
+/// Walk a batch of decoded payloads (tx calldata or log events), find all
+/// `address`-typed inputs, resolve them once against labels + ENS, and
+/// populate the `ens` / `labels` fields on each input in place.
+///
+/// Unlike [`attach_ens`] and [`attach_labels`] — which enrich the top-level
+/// `from` / `to` / emitter columns — this function reaches inside decoded
+/// payloads. One batched lookup per enrichment source per call, regardless
+/// of how many decoded payloads are passed.
+///
+/// No-op when neither enrichment is requested. Collisions are fine: if the
+/// same address appears top-level and inside a decoded input, both sites
+/// get populated (they're independent fields on different structs).
+async fn enrich_decoded_inputs(
+    pool: &crate::db::Pool,
+    ens_ctx: Option<&crate::ens::EnsRuntimeState>,
+    with_labels: bool,
+    decodeds: Vec<&mut crate::decoder::Decoded>,
+) {
+    if !with_labels && ens_ctx.is_none() {
+        return;
+    }
+
+    // Pass 1: collect every address-typed value. Parse once up front so the
+    // populate pass can skip inputs whose value isn't a valid hex string.
+    let mut addrs: Vec<[u8; 20]> = Vec::new();
+    for d in &decodeds {
+        for input in &d.inputs {
+            if input.ty != "address" {
+                continue;
+            }
+            let Some(s) = input.value.as_str() else {
+                continue;
+            };
+            if let Some(a) = crate::labels::parse_address_20(s) {
+                addrs.push(a);
+            }
+        }
+    }
+    if addrs.is_empty() {
+        return;
+    }
+
+    let labels_map = if with_labels {
+        crate::labels::lookup_batch(pool, &addrs).await
+    } else {
+        std::collections::HashMap::new()
+    };
+    let ens_map = if let Some(s) = ens_ctx {
+        crate::ens::lookup_batch(pool, &s.rpc, &addrs, &s.config).await
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Pass 2: populate in place. Empty `labels` vecs are suppressed — we
+    // only set `Some(vec)` when the vec is non-empty, matching the
+    // `skip_serializing_if` contract on the field.
+    for d in decodeds {
+        for input in d.inputs.iter_mut() {
+            if input.ty != "address" {
+                continue;
+            }
+            let Some(s) = input.value.as_str() else {
+                continue;
+            };
+            let Some(addr) = crate::labels::parse_address_20(s) else {
+                continue;
+            };
+            if with_labels {
+                if let Some(ls) = labels_map.get(&addr) {
+                    input.labels = Some(ls.clone());
+                }
+            }
+            if ens_ctx.is_some() {
+                if let Some(n) = ens_map.get(&addr) {
+                    input.ens = Some(n.clone());
+                }
+            }
+        }
+    }
+}
+
 /// Reads the ENS runtime state for `chain_id` from `AppState`. Returns
 /// `None` when the chain has ENS disabled — enrichment call sites
 /// short-circuit to a silent no-op in that case.
@@ -785,6 +874,11 @@ async fn handle_live(
                         for (tx, d) in transactions.iter_mut().zip(decoded) {
                             tx.decoded = Some(d);
                         }
+                        let decodeds: Vec<&mut crate::decoder::Decoded> = transactions
+                            .iter_mut()
+                            .filter_map(|tx| tx.decoded.as_mut().and_then(|o| o.as_mut()))
+                            .collect();
+                        enrich_decoded_inputs(&pool, ens_ctx.as_ref(), params.labels, decodeds).await;
                     }
                     if params.labels {
                         attach_labels(&pool, &rows, &mut transactions).await;
@@ -865,6 +959,11 @@ async fn handle_live(
                                     for (tx, d) in transactions.iter_mut().zip(decoded) {
                                         tx.decoded = Some(d);
                                     }
+                                    let decodeds: Vec<&mut crate::decoder::Decoded> = transactions
+                                        .iter_mut()
+                                        .filter_map(|tx| tx.decoded.as_mut().and_then(|o| o.as_mut()))
+                                        .collect();
+                                    enrich_decoded_inputs(&pool, ens_ctx.as_ref(), params.labels, decodeds).await;
                                 }
                                 if params.labels {
                                     attach_labels(&pool, &rows, &mut transactions).await;
@@ -968,6 +1067,11 @@ pub async fn get_transaction(
     let query_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let mut transaction = row_to_tx(&row);
+    let ens_ctx = if params.ens {
+        ens_context(&state, params.chain_id).await
+    } else {
+        None
+    };
     if params.decode {
         let raw_input: Vec<u8> = row.get(9);
         let decoded = crate::decoder::decode_calldata_batch(&conn, &[raw_input.as_slice()])
@@ -976,15 +1080,17 @@ pub async fn get_transaction(
             .next()
             .flatten();
         transaction.decoded = Some(decoded);
+        let decodeds: Vec<&mut crate::decoder::Decoded> = transaction
+            .decoded
+            .as_mut()
+            .and_then(|o| o.as_mut())
+            .into_iter()
+            .collect();
+        enrich_decoded_inputs(&pool, ens_ctx.as_ref(), params.labels, decodeds).await;
     }
     if params.labels {
         attach_labels(&pool, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
-    let ens_ctx = if params.ens {
-        ens_context(&state, params.chain_id).await
-    } else {
-        None
-    };
     if let Some(s) = &ens_ctx {
         attach_ens(&pool, &s.rpc, &s.config, std::slice::from_ref(&row), std::slice::from_mut(&mut transaction)).await;
     }
@@ -1016,6 +1122,11 @@ pub async fn get_transaction(
             for (log, d) in logs.iter_mut().zip(decoded) {
                 log.decoded = Some(d);
             }
+            let decodeds: Vec<&mut crate::decoder::Decoded> = logs
+                .iter_mut()
+                .filter_map(|log| log.decoded.as_mut().and_then(|o| o.as_mut()))
+                .collect();
+            enrich_decoded_inputs(&pool, ens_ctx.as_ref(), params.labels, decodeds).await;
         }
 
         if params.labels {
