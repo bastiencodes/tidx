@@ -256,6 +256,174 @@ async fn ens_enrichment_is_silent_noop_when_chain_has_no_ens_config() {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Decoded-input enrichment tests
+//
+// These cover the path where `?decode=true&ens=true` reaches inside a decoded
+// calldata payload (Transfer, approve, etc.) and enriches the address-typed
+// arguments in place. Requires seeding the `signatures` table so the decoder
+// can resolve the 4-byte selector.
+
+const RECIPIENT_ADDR: [u8; 20] = [
+    0xca, 0xfe, 0xba, 0xbe, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb,
+];
+
+/// ABI-encode `transfer(address,uint256)` calldata:
+///     selector (4) || zero-padded recipient (32) || zero-padded amount (32)
+///
+/// Selector is computed at test time from the canonical signature keccak
+/// so if anyone edits the seed below without re-hashing, the decoder simply
+/// won't match and the test will fail loudly rather than silently.
+fn encode_transfer_calldata(recipient: [u8; 20], amount: u64) -> Vec<u8> {
+    let sig_hash = alloy::primitives::keccak256(b"transfer(address,uint256)");
+    let mut out = Vec::with_capacity(4 + 32 + 32);
+    out.extend_from_slice(&sig_hash[..4]);
+    let mut padded_addr = [0u8; 32];
+    padded_addr[12..].copy_from_slice(&recipient);
+    out.extend_from_slice(&padded_addr);
+    let mut padded_amount = [0u8; 32];
+    padded_amount[24..].copy_from_slice(&amount.to_be_bytes());
+    out.extend_from_slice(&padded_amount);
+    out
+}
+
+/// Seed a signatures row for `transfer(address,uint256)`. Needed so the
+/// decoder's selector lookup returns the canonical signature.
+async fn seed_transfer_signature(pool: &tidx::db::Pool) {
+    let sig_hash = alloy::primitives::keccak256(b"transfer(address,uint256)");
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO signatures (signature_hash_32, signature)
+        VALUES ($1, $2)
+        ON CONFLICT (signature_hash_32) DO NOTHING
+        "#,
+        &[&sig_hash.as_slice(), &"transfer(address,uint256)".to_string()],
+    )
+    .await
+    .expect("insert signatures");
+}
+
+/// Replace the seeded tx's `input` with valid `transfer(addr, amount)`
+/// calldata. The rest of the tx structure from `seed_one_tx` is reused.
+async fn seed_one_tx_with_transfer_calldata(pool: &tidx::db::Pool) {
+    seed_one_tx(pool).await;
+    let conn = pool.get().await.unwrap();
+    let calldata = encode_transfer_calldata(RECIPIENT_ADDR, 1_000_000);
+    conn.execute(
+        r#"UPDATE txs SET input = $1 WHERE idx = 0"#,
+        &[&calldata.as_slice()],
+    )
+    .await
+    .expect("update tx input with transfer calldata");
+}
+
+/// Insert a fresh `ens_records` row for any specific address. Parallel to
+/// `seed_fresh_ens_record` (which is hardcoded to FROM_ADDR).
+async fn seed_fresh_ens_record_for(
+    pool: &tidx::db::Pool,
+    addr: [u8; 20],
+    name: &str,
+    verified: bool,
+) {
+    let conn = pool.get().await.unwrap();
+    conn.execute(
+        r#"
+        INSERT INTO ens_records (address, name, verified, resolved_at, resolved_block)
+        VALUES ($1, $2, $3, NOW(), 1)
+        ON CONFLICT (address) DO UPDATE SET
+            name = EXCLUDED.name,
+            verified = EXCLUDED.verified,
+            resolved_at = EXCLUDED.resolved_at
+        "#,
+        &[&addr.as_slice(), &name, &verified],
+    )
+    .await
+    .expect("insert ens_records");
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn decoded_input_ens_populated_for_address_typed_input() {
+    let db = TestDb::empty().await;
+    seed_one_tx_with_transfer_calldata(&db.pool).await;
+    seed_transfer_signature(&db.pool).await;
+    seed_fresh_ens_record_for(&db.pool, RECIPIENT_ADDR, "alice.eth", true).await;
+    let mut app = make_test_service_with_ens(db.pool.clone()).await;
+
+    let resp = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&ens=true&decode=true&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = read_json(resp).await;
+    let tx = &json["transactions"][0];
+
+    let decoded = &tx["decoded"];
+    assert_eq!(
+        decoded["signature"], "transfer(address,uint256)",
+        "decoder should resolve the seeded selector: {tx}"
+    );
+    let inputs = decoded["inputs"].as_array().expect("decoded.inputs array");
+    assert_eq!(inputs.len(), 2, "transfer has 2 params: {inputs:?}");
+
+    // Input 0 is the recipient address — must be enriched.
+    assert_eq!(inputs[0]["type"], "address");
+    let ens = inputs[0]
+        .get("ens")
+        .expect("address input must carry `ens` when cache hit");
+    assert_eq!(ens["name"], "alice.eth");
+    assert_eq!(ens["verified"], true);
+
+    // Input 1 is uint256 — must NOT carry `ens` (not an address).
+    assert_eq!(inputs[1]["type"], "uint256");
+    assert!(
+        inputs[1].get("ens").is_none(),
+        "non-address input must not carry `ens`: {:?}",
+        inputs[1]
+    );
+}
+
+#[tokio::test]
+#[serial(db)]
+async fn decoded_input_ens_absent_when_ens_not_requested() {
+    // Sanity-check the inverse: decoding on, ENS cache populated, but the
+    // caller didn't pass ?ens=true. The ens field must be absent from every
+    // decoded input (skip_serializing_if = "Option::is_none").
+    let db = TestDb::empty().await;
+    seed_one_tx_with_transfer_calldata(&db.pool).await;
+    seed_transfer_signature(&db.pool).await;
+    seed_fresh_ens_record_for(&db.pool, RECIPIENT_ADDR, "alice.eth", true).await;
+    let mut app = make_test_service_with_ens(db.pool.clone()).await;
+
+    let resp = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/transactions?chainId=1&decode=true&limit=5")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = read_json(resp).await;
+    let inputs = json["transactions"][0]["decoded"]["inputs"]
+        .as_array()
+        .expect("decoded.inputs array");
+    for (i, input) in inputs.iter().enumerate() {
+        assert!(
+            input.get("ens").is_none(),
+            "decoded.inputs[{i}] must omit `ens` without ens=true: {input}"
+        );
+    }
+}
+
 #[tokio::test]
 #[serial(db)]
 async fn ens_field_absent_without_param_even_when_configured() {
